@@ -13,6 +13,9 @@
   },
   "dependencies": {
     "pg": "^8.13.0",
-    "sharp": "^0.33.5"
+    "sharp": "^0.33.5",
+    "@fontsource/oswald": "^5.1.0",
+    "@fontsource/open-sans": "^5.1.0",
+    "@fontsource/jetbrains-mono": "^5.1.0"
   }
 }

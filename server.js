@@ -15,6 +15,7 @@ const H = require('./lib/http');
 const V = require('./lib/views');
 const { processImage } = require('./lib/images');
 const { sendMail } = require('./lib/mail');
+const L = require('./lib/legal');
 
 const db = open();
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -196,6 +197,20 @@ async function serveStatic(ctx) {
   try {
     const data = await fs.promises.readFile(file);
     ctx.res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'public, max-age=604800' });
+    ctx.res.end(data);
+  } catch { notFound(ctx); }
+}
+
+// Шрифты из пакетов @fontsource: /vendor/fonts/<пакет>/<файл>
+const FONT_PKGS = new Set(['oswald', 'open-sans', 'jetbrains-mono']);
+async function serveFont(ctx) {
+  const m = /^\/vendor\/fonts\/([a-z-]+)\/((?:files\/)?[a-z0-9-]+\.(css|woff2|woff))$/.exec(ctx.path);
+  if (!m || !FONT_PKGS.has(m[1])) return notFound(ctx);
+  const file = path.join(__dirname, 'node_modules', '@fontsource', m[1], m[2]);
+  try {
+    const data = await fs.promises.readFile(file);
+    const type = m[3] === 'css' ? 'text/css; charset=utf-8' : (m[3] === 'woff2' ? 'font/woff2' : 'font/woff');
+    ctx.res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=2592000' });
     ctx.res.end(data);
   } catch { notFound(ctx); }
 }
@@ -439,7 +454,14 @@ async function handle(req, res) {
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
     if (p === '/' && req.method === 'GET') return await pageIndex(ctx);
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
-    if (p === '/privacy') return ctx.html(V.privacy(await getSettings()));
+    if (p === '/privacy' || p === '/consent' || p === '/requisites') {
+      const s = await getSettings();
+      s._root = rootUrl(req);
+      if (p === '/privacy') return ctx.html(V.legalDoc(s, L.policy(s)));
+      if (p === '/consent') return ctx.html(V.legalDoc(s, L.consent(s)));
+      return ctx.html(V.requisitesPage(s, L.requisites(s)));
+    }
+    if (p.startsWith('/vendor/fonts/')) return await serveFont(ctx);
     if (p === '/healthz') return ctx.text('ok');
     if (p === '/robots.txt') return ctx.text(`User-agent: *\nDisallow: /admin\nSitemap: ${rootUrl(req)}sitemap.xml\n`);
     if (p === '/sitemap.xml') {
@@ -456,8 +478,19 @@ async function handle(req, res) {
   }
 }
 
+// Заявки хранятся не дольше года (так написано в политике и согласии) — старые удаляются автоматически.
+async function purgeOldLeads() {
+  try {
+    const cutoff = new Date(Date.now() + 8 * 3600 * 1000 - 365 * 24 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+    const r = await db.run('DELETE FROM leads WHERE created < $1', [cutoff]);
+    if (r.changes) console.log(`Удалено старых заявок (старше года): ${r.changes}`);
+  } catch (err) { console.error('purge error:', err.message); }
+}
+
 async function main() {
   await init();
+  await purgeOldLeads();
+  setInterval(purgeOldLeads, 24 * 3600 * 1000).unref();
   const port = Number(process.env.PORT || 3000);
   http.createServer(handle).listen(port, '0.0.0.0', () => console.log(`CF BAZA: http://localhost:${port}  (база: ${db.kind})`));
 }

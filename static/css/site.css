@@ -235,3 +235,33 @@ p { margin: 0; }
 @media (max-width: 440px) {
   .hero-actions .btn-accent, .hero-actions .btn-white { flex-basis: 100%; max-width: none; }
 }
+
+/* Документы: политика, согласие, реквизиты */
+.doc { max-width: 860px; }
+.doc .h2 { margin-bottom: 20px; }
+.doc h2 { font-size: clamp(20px, 2.2vw, 26px); margin: 32px 0 12px; text-transform: none; font-weight: 600; }
+.doc p, .doc li { color: var(--muted); }
+.doc p { margin: 0 0 12px; }
+.doc ul { margin: 0 0 12px; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
+.doc-intro { font-size: 15px; color: var(--dim) !important; }
+.doc-nav { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 40px !important; }
+.doc-nav a:not(.btn) { color: var(--text); }
+.req { margin: 0; display: grid; gap: 0; }
+.req > div { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 8px 24px; padding: 14px 0; border-top: 1px solid var(--line); }
+.req > div:last-child { border-bottom: 1px solid var(--line); }
+.req dt { color: var(--dim); font-size: 15px; }
+.req dd { margin: 0; font-weight: 600; word-break: break-word; }
+@media (max-width: 520px) { .req > div { grid-template-columns: 1fr; gap: 2px; } }
+
+/* Подвал: юридическая строка */
+.footer-legal { padding-bottom: 28px; font-size: 13px; color: var(--dim); }
+.footer-legal p { margin: 0 0 8px; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.footer-links a { color: var(--muted); }
+
+/* Уведомление о cookie */
+.cookie { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 40; max-width: 720px; margin: 0 auto; background: #1F1F1F; border: 1px solid #444; border-radius: var(--radius); padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; justify-content: space-between; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+.cookie[hidden] { display: none; }
+.cookie p { flex: 1 1 320px; font-size: 14px; color: var(--muted); }
+.cookie a { color: var(--text); }
+.cookie .btn { min-height: 44px; }

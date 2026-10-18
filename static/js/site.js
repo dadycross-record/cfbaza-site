@@ -47,3 +47,20 @@
     update();
   }
 })();
+
+// Уведомление о cookie: показываем один раз, выбор запоминаем в браузере
+(function () {
+  var box = document.getElementById('cookie');
+  if (!box) return;
+  var seen = false;
+  try { seen = localStorage.getItem('cfb_cookie_ok') === '1'; } catch (e) {}
+  if (seen) return;
+  box.hidden = false;
+  var sticky = document.getElementById('sticky-cta');
+  if (sticky) sticky.style.visibility = 'hidden';
+  document.getElementById('cookie-ok').addEventListener('click', function () {
+    try { localStorage.setItem('cfb_cookie_ok', '1'); } catch (e) {}
+    box.hidden = true;
+    if (sticky) sticky.style.visibility = '';
+  });
+})();
