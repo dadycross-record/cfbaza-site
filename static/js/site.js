@@ -64,3 +64,30 @@
     if (sticky) sticky.style.visibility = '';
   });
 })();
+
+// Просмотр фото турниров на весь экран
+(function () {
+  const links = Array.from(document.querySelectorAll('[data-lb]'));
+  if (!links.length) return;
+  const box = document.createElement('div');
+  box.className = 'lb'; box.hidden = true;
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true');
+  box.innerHTML = '<img alt=""><p></p><button class="lb-x" aria-label="Закрыть">×</button><button class="lb-p" aria-label="Предыдущее">‹</button><button class="lb-n" aria-label="Следующее">›</button>';
+  document.body.appendChild(box);
+  const img = box.querySelector('img'), cap = box.querySelector('p');
+  let i = 0;
+  const show = (n) => { i = (n + links.length) % links.length; img.src = links[i].href; img.alt = links[i].title; cap.textContent = links[i].title; };
+  const close = () => { box.hidden = true; document.body.style.overflow = ''; };
+  links.forEach((a, n) => a.addEventListener('click', (ev) => { ev.preventDefault(); show(n); box.hidden = false; document.body.style.overflow = 'hidden'; }));
+  box.addEventListener('click', (ev) => {
+    if (ev.target.classList.contains('lb-p')) show(i - 1);
+    else if (ev.target.classList.contains('lb-n')) show(i + 1);
+    else if (ev.target !== img) close();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (box.hidden) return;
+    if (ev.key === 'Escape') close();
+    if (ev.key === 'ArrowLeft') show(i - 1);
+    if (ev.key === 'ArrowRight') show(i + 1);
+  });
+})();

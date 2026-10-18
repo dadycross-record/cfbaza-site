@@ -68,6 +68,17 @@ async function init() {
     }
     await setSetting('_coach_photos_v1', '1');
   }
+  // Разовое обновление регалий тренеров (подзаголовок и пункты берутся из content.json по фамилии)
+  if (!(await db.get("SELECT value FROM settings WHERE key='_coach_text_v2'"))) {
+    for (const row of await db.all("SELECT * FROM items WHERE kind='coach'")) {
+      const item = JSON.parse(row.data || '{}');
+      const src = C.SEED.coach.find((x) => ['Федоров', 'Харьковенко'].some((n) => x.name.includes(n) && String(item.name || '').includes(n)));
+      if (!src) continue;
+      item.subtitle = src.subtitle; item.bullets = src.bullets;
+      await db.run('UPDATE items SET data=$1, updated=$2 WHERE id=$3', [JSON.stringify(item), now(), row.id]);
+    }
+    await setSetting('_coach_text_v2', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
@@ -252,7 +263,7 @@ async function pageIndex(ctx) {
     s, root: rootUrl(ctx.req),
     facts: await getItems('fact'), steps: await getItems('step'), whys: await getItems('why'),
     photos: await getItems('photo'), schedule: buildSchedule(slots), usedTypes: new Set(slots.map((x) => x.type)),
-    coaches: await getItems('coach'), plans: await getItems('plan'), extras: await getItems('extra'),
+    coaches: await getItems('coach'), evpillars: await getItems('evpillar'), evphotos: await getItems('evphoto'), plans: await getItems('plan'), extras: await getItems('extra'),
     reviews: await getItems('review'), faqs: await getItems('faq'),
     sent: ctx.url.searchParams.get('sent') === '1', flash: ctx.takeFlash(),
   };
