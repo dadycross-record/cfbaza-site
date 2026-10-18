@@ -50,6 +50,24 @@ async function init() {
     }
     await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', [flag, '1']);
   }
+  // Разовая загрузка фото тренеров (только если у тренера ещё нет фото — загруженные в админке не трогаем)
+  const photoFlag = await db.get("SELECT value FROM settings WHERE key='_coach_photos_v1'");
+  if (!photoFlag) {
+    const map = [['Федоров', 'evgeny.jpg'], ['Красникова', 'galina.jpg'], ['Харьковенко', 'sasha.jpg']];
+    for (const row of await db.all("SELECT * FROM items WHERE kind='coach'")) {
+      const item = JSON.parse(row.data || '{}');
+      const hit = map.find(([n]) => String(item.name || '').includes(n));
+      if (!hit || item.photo) continue;
+      try {
+        const data = await fs.promises.readFile(path.join(STATIC_DIR, 'img', 'coaches', hit[1]));
+        const id = crypto.randomBytes(16).toString('hex') + '.jpg';
+        await db.run('INSERT INTO files(id, mime, data, created) VALUES ($1, $2, $3, $4)', [id, 'image/jpeg', data, now()]);
+        item.photo = id;
+        await db.run('UPDATE items SET data=$1, updated=$2 WHERE id=$3', [JSON.stringify(item), now(), row.id]);
+      } catch (err) { console.error('coach photo:', err.message); }
+    }
+    await setSetting('_coach_photos_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
