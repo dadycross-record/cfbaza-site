@@ -128,12 +128,13 @@ function notifyTelegram(text) {
 
 function notifyEmail(subject, text, toAddr) {
   const host = process.env.SMTP_HOST || 'smtp.yandex.ru';
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASSWORD;
+  const user = String(process.env.SMTP_USER || '').trim();
+  const pass = String(process.env.SMTP_PASSWORD || '').replace(/\s+/g, ''); // пароль приложения часто копируют с пробелами
   const to = String(toAddr || '').split(/[,;\s]+/).filter((a) => a.includes('@'));
   if (!user || !pass || !to.length) return;
   sendMail({ host, port: process.env.SMTP_PORT || 465, user, pass, to, subject, text })
-    .catch((err) => console.error('Email error:', err.message));
+    .then(() => console.log(`Письмо о заявке отправлено: ${user} → ${to.join(', ')}`))
+    .catch((err) => console.error(`Email error (${user}, пароль ${pass.length} симв.):`, err.message));
 }
 
 // ---------------------------------------------------------------------------
