@@ -1239,16 +1239,16 @@
         "caption": "Турнир под открытым небом — площадка в центре Иркутска"
       },
       {
+        "image": "/static/img/events/8-thumb.jpg",
+        "caption": "Соревновательная площадка перед стартом"
+      },
+      {
         "image": "/static/img/events/2-thumb.jpg",
         "caption": "Судейская команда Кубка России «Вызов Сибири»"
       },
       {
         "image": "/static/img/events/3-thumb.jpg",
         "caption": "Команда судей перед стартом"
-      },
-      {
-        "image": "/static/img/events/7-thumb.jpg",
-        "caption": "Команда CF BAZA с медалями турнира"
       },
       {
         "image": "/static/img/events/4-thumb.jpg",
@@ -1261,6 +1261,10 @@
       {
         "image": "/static/img/events/6-thumb.jpg",
         "caption": "Судейская бригада на открытии соревнований"
+      },
+      {
+        "image": "/static/img/events/9-thumb.jpg",
+        "caption": "Старт забега на турнире"
       }
     ]
   },

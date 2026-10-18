@@ -95,6 +95,17 @@ async function init() {
     await setSetting('events_tags', '');
     await setSetting('_events_text_v2', '1');
   }
+  // Разовая замена фото турниров: убрать командное фото с медалями, добавить площадку и забег
+  if (!(await db.get("SELECT value FROM settings WHERE key='_evphoto89_v1'"))) {
+    const all = await db.all("SELECT * FROM items WHERE kind='evphoto' ORDER BY sort, id");
+    for (const r of all) if (String(r.data).includes('events/7-thumb')) await db.run('DELETE FROM items WHERE id=$1', [r.id]);
+    if (all.length && !all.some((r) => String(r.data).includes('events/8-thumb'))) {
+      const first = Number(all[0].sort), last = Number(all[all.length - 1].sort);
+      await db.run('INSERT INTO items(kind, sort, data, updated) VALUES ($1, $2, $3, $4)', ['evphoto', first + 5, JSON.stringify(C.SEED.evphoto[1]), now()]);
+      await db.run('INSERT INTO items(kind, sort, data, updated) VALUES ($1, $2, $3, $4)', ['evphoto', last + 10, JSON.stringify(C.SEED.evphoto[C.SEED.evphoto.length - 1]), now()]);
+    }
+    await setSetting('_evphoto89_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
