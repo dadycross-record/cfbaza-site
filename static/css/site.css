@@ -309,3 +309,28 @@ p { margin: 0; }
   .ev-grid.n7, .ev-grid.n8 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ev-grid.n7 .ev-ph:first-child { aspect-ratio: 16 / 7; height: auto; min-height: 0; }
 }
+
+/* Пометки «красным карандашом» */
+.pencil { background: url('/static/img/pencil-underline.svg') left 98% / 100% .4em no-repeat; -webkit-box-decoration-break: clone; box-decoration-break: clone; padding-bottom: .12em; }
+.sec-head.scribble > p { position: relative; padding: 36px 42px; margin-left: 24px; }
+.sec-head.scribble > p::after { content: ''; position: absolute; inset: -4px -8px; background: url('/static/img/pencil-circle.svg') center / 100% 100% no-repeat; pointer-events: none; }
+.pencil-arrow { position: absolute; left: -190px; top: -64px; width: 210px; height: 105px; background: url('/static/img/pencil-arrow.svg') center / contain no-repeat; pointer-events: none; }
+@media (max-width: 860px) {
+  .sec-head.scribble { gap: 84px; }
+  .sec-head.scribble > p { margin-left: 0; margin-right: 6px; padding: 38px 34px; }
+  .pencil-arrow { left: 52%; top: -76px; width: 130px; height: 65px; transform: rotate(52deg); }
+}
+
+/* Окно звонка */
+.callbox { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,.72); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.callbox[hidden] { display: none; }
+.callbox-card { position: relative; width: 100%; max-width: 380px; background: var(--bg); color: var(--text); border-radius: 20px; padding: 32px 26px 24px; text-align: center; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5); border-top: 4px solid var(--accent); animation: cbIn .2s ease; }
+@keyframes cbIn { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.callbox-ic { width: 60px; height: 60px; margin: 0 auto 4px; border-radius: 50%; background: var(--accent); color: var(--ink); display: flex; align-items: center; justify-content: center; }
+.callbox-ic svg { width: 28px; height: 28px; }
+.callbox-t { margin: 0; color: var(--muted); font-size: 15px; }
+.callbox-num { font-family: var(--display); font-weight: 700; font-size: clamp(28px, 8vw, 34px); color: var(--text); text-decoration: none; letter-spacing: .01em; line-height: 1.1; }
+.callbox-h { margin: -4px 0 6px; font-size: 14px; color: var(--muted); }
+.callbox-go, .callbox-copy { width: 100%; }
+.callbox-form { color: var(--muted); font-size: 14px; margin-top: 2px; }
+.callbox-x { position: absolute; top: 10px; right: 10px; width: 38px; height: 38px; border-radius: 50%; border: 0; background: rgba(255,255,255,.08); color: var(--text); font-size: 24px; cursor: pointer; line-height: 1; }

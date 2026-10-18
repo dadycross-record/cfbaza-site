@@ -91,3 +91,24 @@
     if (ev.key === 'ArrowRight') show(i + 1);
   });
 })();
+
+// Окно с номером телефона
+(function () {
+  const box = document.getElementById('callbox');
+  if (!box) return;
+  const close = () => { box.hidden = true; document.body.style.overflow = ''; };
+  document.querySelectorAll('[data-callbox]').forEach((a) => a.addEventListener('click', (ev) => {
+    ev.preventDefault(); box.hidden = false; document.body.style.overflow = 'hidden';
+    box.querySelector('.callbox-go').focus();
+  }));
+  box.addEventListener('click', (ev) => {
+    if (ev.target === box || ev.target.closest('.callbox-x')) close();
+    if (ev.target.closest('.callbox-form')) close();
+    const copy = ev.target.closest('.callbox-copy');
+    if (copy) {
+      const done = () => { copy.textContent = 'Номер скопирован ✓'; setTimeout(() => { copy.textContent = 'Скопировать номер'; }, 2000); };
+      if (navigator.clipboard) navigator.clipboard.writeText(copy.dataset.num).then(done, done); else done();
+    }
+  });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && !box.hidden) close(); });
+})();
