@@ -106,6 +106,14 @@ async function init() {
     }
     await setSetting('_evphoto89_v1', '1');
   }
+  // Разовая правка «Турниров»: опыт с 2018 года
+  if (!(await db.get("SELECT value FROM settings WHERE key='_events_2018_v1'"))) {
+    const t = await db.get("SELECT value FROM settings WHERE key='events_text'");
+    if (!t || String(t.value).startsWith('CF BAZA — партнёр крупнейших')) await setSetting('events_text', C.SETTINGS_DEFAULTS.events_text);
+    const ey = await db.get("SELECT value FROM settings WHERE key='events_eyebrow'");
+    if (!ey || ey.value === 'Турниры и соревнования') await setSetting('events_eyebrow', C.SETTINGS_DEFAULTS.events_eyebrow);
+    await setSetting('_events_2018_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
