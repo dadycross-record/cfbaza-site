@@ -334,3 +334,26 @@ p { margin: 0; }
 .callbox-go, .callbox-copy { width: 100%; }
 .callbox-form { color: var(--muted); font-size: 14px; margin-top: 2px; }
 .callbox-x { position: absolute; top: 10px; right: 10px; width: 38px; height: 38px; border-radius: 50%; border: 0; background: rgba(255,255,255,.08); color: var(--text); font-size: 24px; cursor: pointer; line-height: 1; }
+
+/* Турниры: фото крупнее, под текстом */
+.ev-top { grid-template-columns: 1fr; gap: clamp(28px, 4vw, 44px); }
+.ev-intro { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); column-gap: clamp(28px, 5vw, 80px); align-items: end; }
+.ev-intro > .eyebrow, .ev-intro > h2 { grid-column: 1; }
+.ev-intro > .ev-lead { grid-column: 2; grid-row: 1 / span 2; margin: 0; }
+.ev-grid, .ev-grid.n7, .ev-grid.n8 { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.ev-grid.n6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 860px) {
+  .ev-intro { grid-template-columns: 1fr; }
+  .ev-intro > .ev-lead { grid-column: 1; grid-row: auto; margin-top: 18px; }
+  .ev-grid, .ev-grid.n6, .ev-grid.n7, .ev-grid.n8 { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 10px; margin: 0 -16px; padding: 0 16px 6px; scrollbar-width: none; }
+  .ev-grid::-webkit-scrollbar { display: none; }
+  .ev-grid .ev-ph, .ev-grid.n7 .ev-ph:first-child { flex: 0 0 82%; aspect-ratio: 4 / 3; height: auto; min-height: 0; scroll-snap-align: start; }
+}
+
+/* Отзывы: компактный раздел */
+.reviews.section { padding: calc(var(--sec-y) / 2) 0; }
+.reviews .h2 { font-size: clamp(24px, 2.6vw, 34px); margin-bottom: clamp(16px, 2vw, 24px); }
+.reviews .cards { gap: 12px; }
+.reviews .review { padding: 16px 18px; gap: 10px; flex-basis: 260px; }
+.reviews .review blockquote { font-size: 15px; line-height: 1.5; }
+.reviews .review figcaption { font-size: 14px; }

@@ -88,6 +88,13 @@ async function init() {
     }
     await setSetting('_evphoto7_v1', '1');
   }
+  // Разовая правка текста «Турниров»: «программируют комплексы», без названий турниров
+  if (!(await db.get("SELECT value FROM settings WHERE key='_events_text_v2'"))) {
+    const t = await db.get("SELECT value FROM settings WHERE key='events_text'");
+    if (t && t.value) await setSetting('events_text', t.value.replace('пишут программу', 'программируют комплексы'));
+    await setSetting('events_tags', '');
+    await setSetting('_events_text_v2', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
