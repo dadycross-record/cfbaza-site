@@ -303,3 +303,9 @@ p { margin: 0; }
 .lb .lb-p { left: 12px; top: 50%; }
 .lb .lb-n { right: 12px; top: 50%; }
 .events .h2-big { font-size: clamp(32px, 3.7vw, 56px); }
+.ev-grid.n7, .ev-grid.n8 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ev-grid.n7 .ev-ph:first-child { grid-column: span 2; aspect-ratio: auto; height: 0; min-height: 100%; }
+@media (max-width: 560px) {
+  .ev-grid.n7, .ev-grid.n8 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ev-grid.n7 .ev-ph:first-child { aspect-ratio: 16 / 7; height: auto; min-height: 0; }
+}

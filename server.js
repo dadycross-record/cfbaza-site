@@ -79,6 +79,15 @@ async function init() {
     }
     await setSetting('_coach_text_v3', '1');
   }
+  // Разовое добавление 7-го фото турниров (командное фото с медалями)
+  if (!(await db.get("SELECT value FROM settings WHERE key='_evphoto7_v1'"))) {
+    const all = await db.all("SELECT * FROM items WHERE kind='evphoto' ORDER BY sort, id");
+    if (all.length && !all.some((r) => String(r.data).includes('events/7-thumb'))) {
+      const sort = all.length >= 3 ? Number(all[2].sort) + 5 : 1000;
+      await db.run('INSERT INTO items(kind, sort, data, updated) VALUES ($1, $2, $3, $4)', ['evphoto', sort, JSON.stringify(C.SEED.evphoto[3]), now()]);
+    }
+    await setSetting('_evphoto7_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
