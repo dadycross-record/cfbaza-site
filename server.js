@@ -114,6 +114,15 @@ async function init() {
     if (!ey || ey.value === 'Турниры и соревнования') await setSetting('events_eyebrow', C.SETTINGS_DEFAULTS.events_eyebrow);
     await setSetting('_events_2018_v1', '1');
   }
+  // Разовое добавление фото зала в раздел про оборудование
+  if (!(await db.get("SELECT value FROM settings WHERE key='_gym_photos_v1'"))) {
+    const n = Number((await db.get("SELECT COUNT(*) AS n FROM items WHERE kind='photo'")).n);
+    if (n === 0) {
+      let i = 0;
+      for (const row of C.SEED.photo) { i += 1; await db.run('INSERT INTO items(kind, sort, data, updated) VALUES ($1, $2, $3, $4)', ['photo', i * 10, JSON.stringify(row), now()]); }
+    }
+    await setSetting('_gym_photos_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
