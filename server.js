@@ -49,13 +49,19 @@ async function init() {
     }
     await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', [flag, '1']);
   }
-  if (!existing.has('_admin_hash')) {
-    let pwd = process.env.ADMIN_PASSWORD;
-    if (!pwd) {
-      pwd = crypto.randomBytes(8).toString('base64url');
-      console.log(`\n*** Пароль администратора не задан. Сгенерирован: ${pwd}\n*** Логин: admin. Смените пароль в админке.\n`);
+  // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
+  // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
+  const envPwd = process.env.ADMIN_PASSWORD;
+  if (envPwd) {
+    const fp = crypto.createHash('sha256').update('cfbaza:' + envPwd).digest('hex');
+    const stored = await db.get("SELECT value FROM settings WHERE key='_admin_env_fp'");
+    if (!stored || stored.value !== fp || !existing.has('_admin_hash')) {
+      await setSetting('_admin_hash', H.hashPassword(envPwd));
+      await setSetting('_admin_env_fp', fp);
+      console.log('Пароль администратора установлен из ADMIN_PASSWORD.');
     }
-    await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', ['_admin_hash', H.hashPassword(pwd)]);
+  } else if (!existing.has('_admin_hash')) {
+    console.log('ВНИМАНИЕ: не задан ADMIN_PASSWORD — вход в админку недоступен, пока переменная не появится.');
   }
   let secret = process.env.SECRET_KEY;
   if (!secret) {
