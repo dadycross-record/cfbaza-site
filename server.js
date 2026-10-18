@@ -69,7 +69,7 @@ async function init() {
     await setSetting('_coach_photos_v1', '1');
   }
   // Разовое обновление регалий тренеров (подзаголовок и пункты берутся из content.json по фамилии)
-  if (!(await db.get("SELECT value FROM settings WHERE key='_coach_text_v2'"))) {
+  if (!(await db.get("SELECT value FROM settings WHERE key='_coach_text_v3'"))) {
     for (const row of await db.all("SELECT * FROM items WHERE kind='coach'")) {
       const item = JSON.parse(row.data || '{}');
       const src = C.SEED.coach.find((x) => ['Федоров', 'Харьковенко'].some((n) => x.name.includes(n) && String(item.name || '').includes(n)));
@@ -77,7 +77,7 @@ async function init() {
       item.subtitle = src.subtitle; item.bullets = src.bullets;
       await db.run('UPDATE items SET data=$1, updated=$2 WHERE id=$3', [JSON.stringify(item), now(), row.id]);
     }
-    await setSetting('_coach_text_v2', '1');
+    await setSetting('_coach_text_v3', '1');
   }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
