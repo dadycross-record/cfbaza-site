@@ -362,3 +362,12 @@ p { margin: 0; }
 .gallery.n2 .gal-ph { aspect-ratio: 16 / 10; }
 .gallery img { transition: transform .35s ease; }
 .gallery .gal-ph:hover img { transform: scale(1.04); }
+
+/* Последний абонемент, оставшийся один в ряду (например «Детский»), — широкой полосой */
+@media (min-width: 900px) {
+  .plans > .plan:last-child:nth-child(4n+1) { flex-basis: 100%; display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 1.4fr) 240px; align-items: center; column-gap: 32px; row-gap: 4px; }
+  .plans > .plan:last-child:nth-child(4n+1) .plan-name { grid-column: 1; grid-row: 1; }
+  .plans > .plan:last-child:nth-child(4n+1) .plan-price { grid-column: 1; grid-row: 2; }
+  .plans > .plan:last-child:nth-child(4n+1) ul { grid-column: 2; grid-row: 1 / span 2; }
+  .plans > .plan:last-child:nth-child(4n+1) .btn { grid-column: 3; grid-row: 1 / span 2; }
+}

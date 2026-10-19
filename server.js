@@ -123,6 +123,17 @@ async function init() {
     }
     await setSetting('_gym_photos_v1', '1');
   }
+  // Разовое добавление: тренер Валентина Федорова и детский абонемент
+  if (!(await db.get("SELECT value FROM settings WHERE key='_valentina_kids_v1'"))) {
+    for (const [kind, name] of [['coach', 'Валентина Федорова'], ['plan', 'Детский']]) {
+      const rows = await db.all('SELECT * FROM items WHERE kind=$1 ORDER BY sort, id', [kind]);
+      if (rows.some((r) => JSON.parse(r.data || '{}').name === name)) continue;
+      const row = C.SEED[kind].find((x) => x.name === name);
+      const sort = rows.length ? Number(rows[rows.length - 1].sort) + 10 : 10;
+      await db.run('INSERT INTO items(kind, sort, data, updated) VALUES ($1, $2, $3, $4)', [kind, sort, JSON.stringify(row), now()]);
+    }
+    await setSetting('_valentina_kids_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
