@@ -145,6 +145,18 @@ async function init() {
     }
     await setSetting('_kids_text_v2', '1');
   }
+  // Разовая правка формулировок по всему сайту: «под руководством тренера»
+  if (!(await db.get("SELECT value FROM settings WHERE key='_rukovodstvo_v1'"))) {
+    const R = [["групповые тренировки с тренерами-атлетами", "групповые тренировки под руководством тренеров-атлетов"], ["Групповые тренировки с тренером", "Групповые тренировки под руководством тренера"], ["первая тренировка с тренером", "первая тренировка под руководством тренера"], ["работаете под наблюдением тренера", "работаете под руководством тренера"]];
+    const fix = (t) => R.reduce((acc, [a, b]) => acc.split(a).join(b), String(t));
+    for (const r of await db.all('SELECT key, value FROM settings')) {
+      const v = fix(r.value); if (v !== r.value) await setSetting(r.key, v);
+    }
+    for (const r of await db.all('SELECT id, data FROM items')) {
+      const v = fix(r.data); if (v !== r.data) await db.run('UPDATE items SET data=$1, updated=$2 WHERE id=$3', [v, now(), r.id]);
+    }
+    await setSetting('_rukovodstvo_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
