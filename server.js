@@ -134,6 +134,17 @@ async function init() {
     }
     await setSetting('_valentina_kids_v1', '1');
   }
+  // Разовая правка детского абонемента: «под руководством тренера»
+  if (!(await db.get("SELECT value FROM settings WHERE key='_kids_text_v2'"))) {
+    for (const r of await db.all("SELECT * FROM items WHERE kind='plan'")) {
+      const it = JSON.parse(r.data || '{}');
+      if (it.name === 'Детский' && String(it.features || '').includes('в детской группе с тренером')) {
+        it.features = it.features.replace('в детской группе с тренером', 'в детской группе под руководством тренера');
+        await db.run('UPDATE items SET data=$1, updated=$2 WHERE id=$3', [JSON.stringify(it), now(), r.id]);
+      }
+    }
+    await setSetting('_kids_text_v2', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
