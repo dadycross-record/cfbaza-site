@@ -309,7 +309,7 @@ async function serveStatic(ctx) {
 }
 
 // Шрифты из пакетов @fontsource: /vendor/fonts/<пакет>/<файл>
-const FONT_PKGS = new Set(['oswald', 'open-sans', 'jetbrains-mono']);
+const FONT_PKGS = new Set(['oswald', 'open-sans', 'jetbrains-mono', 'caveat']);
 async function serveFont(ctx) {
   const m = /^\/vendor\/fonts\/([a-z-]+)\/((?:files\/)?[a-z0-9-]+\.(css|woff2|woff))$/.exec(ctx.path);
   if (!m || !FONT_PKGS.has(m[1])) return notFound(ctx);
