@@ -17,6 +17,7 @@
     "@fontsource/oswald": "^5.1.0",
     "@fontsource/open-sans": "^5.1.0",
     "@fontsource/jetbrains-mono": "^5.1.0",
-    "@fontsource/caveat": "^5.1.0"
+    "@fontsource/caveat": "^5.1.0",
+    "jszip": "^3.10.1"
   }
 }

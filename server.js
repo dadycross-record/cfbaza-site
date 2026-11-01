@@ -16,6 +16,7 @@ const V = require('./lib/views');
 const { processImage } = require('./lib/images');
 const { sendMail } = require('./lib/mail');
 const L = require('./lib/legal');
+const W = require('./lib/wod');
 
 const db = open();
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -163,6 +164,20 @@ async function init() {
     if (!cur || !String(cur.value || '').trim()) await setSetting('metrika_id', '113979373');
     await setSetting('_metrika_v1', '1');
   }
+  // Разовая загрузка архива тренировок из группы BAZATEAM в «Программу тренировок»
+  if (!(await db.get("SELECT value FROM settings WHERE key='_wods_seed_v1'"))) {
+    const n = Number((await db.get('SELECT COUNT(*) AS n FROM wods')).n);
+    if (n === 0) {
+      try {
+        const rows = JSON.parse(await fs.promises.readFile(path.join(__dirname, 'seed', 'wods.json'), 'utf8'));
+        for (const [track, wdate, author, body] of rows) {
+          await db.run('INSERT INTO wods(track, wdate, body, image, author, active, created) VALUES ($1, $2, $3, $4, $5, 1, $6)', [track, wdate, body, '', author, now()]);
+        }
+        console.log(`Программа тренировок: загружено ${rows.length} тренировок из архива.`);
+      } catch (err) { console.error('wods seed:', err.message); }
+    }
+    await setSetting('_wods_seed_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
@@ -293,10 +308,12 @@ class Ctx {
   headers(extra = {}) {
     const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', ...extra };
     if (this.path.startsWith('/admin')) { h['X-Frame-Options'] = 'DENY'; h['Cache-Control'] = 'no-store'; }
+    const cookies = [...(this.extraCookies || [])];
     if (this.sessionDirty) {
       this.session._exp = Date.now() + 14 * 24 * 3600 * 1000;
-      h['Set-Cookie'] = `cfb=${encodeURIComponent(codec.encode(this.session))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${isHttps(this.req) ? '; Secure' : ''}`;
+      cookies.push(`cfb=${encodeURIComponent(codec.encode(this.session))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${isHttps(this.req) ? '; Secure' : ''}`);
     }
+    if (cookies.length) h['Set-Cookie'] = cookies;
     return h;
   }
   html(body, status = 200) { this.res.writeHead(status, this.headers({ 'Content-Type': 'text/html; charset=utf-8' })); this.res.end(body); }
@@ -380,6 +397,159 @@ async function postLead(ctx) {
   notifyTelegram(body);
   notifyEmail(`Заявка с сайта: ${name || phone}`, body, s.notify_email);
   return wantsJson ? ctx.json({ ok: true }) : ctx.redirect('/?sent=1#contacts');
+}
+
+// ---------------------------------------------------------------------------
+// Программа тренировок
+// ---------------------------------------------------------------------------
+const TRACKS = C.TRACKS.map(([slug, name, about]) => ({ slug, name, about }));
+const TRACK_SLUGS = new Set(TRACKS.map((t) => t.slug));
+const today = () => now().slice(0, 10);
+const addDays = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+function trackOf(name) {
+  const v = String(name || '').trim().toLowerCase();
+  if (!v) return null;
+  const t = TRACKS.find((x) => x.slug === v || x.name.toLowerCase() === v || x.name.toLowerCase().startsWith(v) || v.startsWith(x.name.toLowerCase().slice(0, 4)));
+  if (t) return t.slug;
+  if (/дет|kid|подрост/.test(v)) return 'kids';
+  if (/атлет|band|сборн/.test(v)) return 'athletes';
+  if (/гонк|hyrox|race/.test(v)) return 'race';
+  if (/record|команд|team/.test(v)) return 'teams';
+  if (/груп|class|общ/.test(v)) return 'group';
+  return null;
+}
+
+function deviceId(ctx) {
+  let id = ctx.cookies.cfd;
+  if (!/^[0-9a-f]{32}$/.test(id || '')) {
+    id = crypto.randomBytes(16).toString('hex');
+    (ctx.extraCookies = ctx.extraCookies || []).push(`cfd=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${2 * 365 * 24 * 3600}${isHttps(ctx.req) ? '; Secure' : ''}`);
+    ctx.cookies.cfd = id;
+  }
+  return id;
+}
+
+async function pageProgram(ctx) {
+  const s = await getSettings();
+  const track = TRACK_SLUGS.has(ctx.url.searchParams.get('t')) ? ctx.url.searchParams.get('t') : TRACKS[0].slug;
+  const ahead = Math.max(0, Math.min(14, Number(s.program_days_ahead) || 0));
+  const maxDate = addDays(today(), ahead);
+  const before = /^\d{4}-\d{2}-\d{2}$/.test(ctx.url.searchParams.get('before') || '') ? ctx.url.searchParams.get('before') : null;
+  const lim = before && before <= maxDate ? before : null;
+  const days = await db.all(`SELECT DISTINCT wdate FROM wods WHERE active=1 AND track=$1 AND wdate <= $2${lim ? ' AND wdate < $3' : ''} ORDER BY wdate DESC LIMIT 14`, lim ? [track, maxDate, lim] : [track, maxDate]);
+  let wods = [];
+  if (days.length) {
+    const last = days[days.length - 1].wdate;
+    const first = days[0].wdate;
+    wods = await db.all('SELECT * FROM wods WHERE active=1 AND track=$1 AND wdate >= $2 AND wdate <= $3 ORDER BY wdate DESC, id ASC', [track, last, first]);
+  }
+  const dev = deviceId(ctx);
+  const ids = wods.map((w) => w.id);
+  const counts = {}; const mine = new Set();
+  if (ids.length) {
+    const ph = ids.map((_, i) => `$${i + 1}`).join(',');
+    for (const r of await db.all(`SELECT wod_id, COUNT(*) AS n FROM wod_done WHERE wod_id IN (${ph}) GROUP BY wod_id`, ids)) counts[r.wod_id] = Number(r.n);
+    for (const r of await db.all(`SELECT wod_id FROM wod_done WHERE device=$${ids.length + 1} AND wod_id IN (${ph})`, [...ids, dev])) mine.add(Number(r.wod_id));
+  }
+  const totals = {};
+  for (const r of await db.all('SELECT track, COUNT(*) AS n FROM wods WHERE active=1 AND wdate <= $1 GROUP BY track', [maxDate])) totals[r.track] = Number(r.n);
+  const myTotal = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [dev])).n);
+  const more = days.length === 14 ? days[days.length - 1].wdate : null;
+  ctx.html(V.programPage({ s, root: SITE_URL, tracks: TRACKS, track, wods: wods.map((w) => ({ ...w, blocks: W.toBlocks(w.body), done: counts[w.id] || 0, mine: mine.has(w.id) })), totals, myTotal, more, today: today() }));
+}
+
+async function postWodDone(ctx) {
+  if (rateLimited('done:' + clientIp(ctx.req), 200, 3600000)) return ctx.json({ ok: false, error: 'Слишком много отметок, попробуйте позже.' }, 429);
+  let body = {};
+  try { body = JSON.parse((await H.readBody(ctx.req)).toString('utf8') || '{}'); } catch { return ctx.json({ ok: false }, 400); }
+  const id = Number(body.id);
+  const w = await db.get('SELECT id FROM wods WHERE id=$1 AND active=1', [id]);
+  if (!w) return ctx.json({ ok: false }, 404);
+  const dev = deviceId(ctx);
+  if (body.on) await db.run('INSERT INTO wod_done(wod_id, device, created) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, dev, now()]);
+  else await db.run('DELETE FROM wod_done WHERE wod_id=$1 AND device=$2', [id, dev]);
+  const n = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE wod_id=$1', [id])).n);
+  const total = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [dev])).n);
+  return ctx.json({ ok: true, count: n, on: !!body.on, total });
+}
+
+async function adminProgram(ctx, form) {
+  if (form) {
+    const a = form.fields.action;
+    if (a === 'delete') {
+      const w = await db.get('SELECT * FROM wods WHERE id=$1', [Number(form.fields.id)]);
+      if (w) { if (w.image) await deleteUpload(w.image); await db.run('DELETE FROM wods WHERE id=$1', [w.id]); await db.run('DELETE FROM wod_done WHERE wod_id=$1', [w.id]); ctx.flash('ok', 'Тренировка удалена.'); }
+      return ctx.redirect('/admin/program' + (ctx.url.search || ''));
+    }
+    if (a === 'toggle') {
+      await db.run('UPDATE wods SET active=1-active WHERE id=$1', [Number(form.fields.id)]);
+      return ctx.redirect('/admin/program' + (ctx.url.search || ''));
+    }
+    // Добавление: текст, таблица и/или скриншот
+    const track = TRACK_SLUGS.has(form.fields.track) ? form.fields.track : TRACKS[0].slug;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(form.fields.wdate || '') ? form.fields.wdate : today();
+    const author = String(form.fields.author || '').trim().slice(0, 80);
+    let list = [];
+    try {
+      if (form.files.table) {
+        const rows = await W.readTable(form.files.table);
+        list = list.concat(W.rowsToWods(rows, { defaultDate: date, defaultTrack: track, trackOf }));
+      }
+      const text = String(form.fields.body || '');
+      if (text.trim()) list = list.concat((form.fields.split ? W.splitByDates(text, date) : [{ date, body: W.tidy(text) }]).map((w) => ({ ...w, track })));
+      let image = '';
+      if (form.files.image) image = await saveUpload(form.files.image, 1600);
+      if (image) {
+        if (list.length === 1) list[0].image = image;
+        else list.push({ date, track, body: '', image });
+      }
+    } catch (err) { ctx.flash('error', err.message); return ctx.redirect('/admin/program'); }
+    if (!list.length) { ctx.flash('error', 'Нечего добавлять: вставьте текст, таблицу или скриншот.'); return ctx.redirect('/admin/program'); }
+    for (const w of list) {
+      await db.run('INSERT INTO wods(track, wdate, body, image, author, active, created) VALUES ($1, $2, $3, $4, $5, 1, $6)', [w.track || track, w.date || date, w.body || '', w.image || '', author, now()]);
+    }
+    const dates = [...new Set(list.map((w) => w.date))].sort();
+    ctx.flash('ok', list.length === 1 ? `Тренировка на ${dates[0].split('-').reverse().join('.')} добавлена.` : `Добавлено тренировок: ${list.length} (${dates[0].split('-').reverse().join('.')} — ${dates[dates.length - 1].split('-').reverse().join('.')}).`);
+    return ctx.redirect('/admin/program');
+  }
+  const track = TRACK_SLUGS.has(ctx.url.searchParams.get('t')) ? ctx.url.searchParams.get('t') : '';
+  const q = String(ctx.url.searchParams.get('q') || '').trim();
+  const page = Math.max(0, Number(ctx.url.searchParams.get('p')) || 0);
+  const where = []; const params = [];
+  if (track) { params.push(track); where.push(`track=$${params.length}`); }
+  if (q) { params.push('%' + q.toLowerCase() + '%'); where.push(`LOWER(body) LIKE $${params.length}`); }
+  const rows = await db.all(`SELECT * FROM wods${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY wdate DESC, id DESC LIMIT 51 OFFSET ${page * 50}`, params);
+  const counts = {};
+  if (rows.length) {
+    const ph = rows.map((_, i) => `$${i + 1}`).join(',');
+    for (const r of await db.all(`SELECT wod_id, COUNT(*) AS n FROM wod_done WHERE wod_id IN (${ph}) GROUP BY wod_id`, rows.map((r) => r.id))) counts[r.wod_id] = Number(r.n);
+  }
+  const totals = {};
+  for (const r of await db.all('SELECT track, COUNT(*) AS n FROM wods GROUP BY track')) totals[r.track] = Number(r.n);
+  return adminRender(ctx, 'Программа тренировок', V.adminProgram({
+    tracks: TRACKS, track, q, page, today: today(), totals, csrf: ctx.session.csrf,
+    rows: rows.slice(0, 50).map((w) => ({ ...w, summary: W.summary(w.body), done: counts[w.id] || 0 })), hasMore: rows.length > 50,
+  }));
+}
+
+async function adminProgramEdit(ctx, id, form) {
+  const w = await db.get('SELECT * FROM wods WHERE id=$1', [id]);
+  if (!w) return notFound(ctx);
+  if (form) {
+    const track = TRACK_SLUGS.has(form.fields.track) ? form.fields.track : w.track;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(form.fields.wdate || '') ? form.fields.wdate : w.wdate;
+    let image = w.image;
+    try {
+      if (form.fields.image__remove) { await deleteUpload(image); image = ''; }
+      const nid = await saveUpload(form.files.image, 1600);
+      if (nid) { await deleteUpload(image); image = nid; }
+    } catch (err) { ctx.flash('error', err.message); return ctx.redirect(ctx.path); }
+    await db.run('UPDATE wods SET track=$1, wdate=$2, body=$3, image=$4, author=$5, active=$6 WHERE id=$7',
+      [track, date, W.tidy(form.fields.body || ''), image, String(form.fields.author || '').trim().slice(0, 80), form.fields.active ? 1 : 0, id]);
+    ctx.flash('ok', 'Сохранено.');
+    return ctx.redirect('/admin/program');
+  }
+  return adminRender(ctx, 'Тренировка', V.adminProgramEdit({ w: { ...w, blocks: W.toBlocks(w.body) }, tracks: TRACKS, csrf: ctx.session.csrf }));
 }
 
 // ---------------------------------------------------------------------------
@@ -555,8 +725,10 @@ async function handleAdmin(ctx) {
   if (p === '/admin/leads') return adminLeads(ctx, form);
   if (p === '/admin/leads.csv') return adminLeadsCsv(ctx);
   if (p === '/admin/password') return adminPassword(ctx, form);
+  if (p === '/admin/program') return adminProgram(ctx, form);
   let m;
   if ((m = /^\/admin\/settings\/(\d+)$/.exec(p))) return adminSettings(ctx, Number(m[1]), form);
+  if ((m = /^\/admin\/program\/(\d+)$/.exec(p))) return adminProgramEdit(ctx, Number(m[1]), form);
   if ((m = /^\/admin\/c\/([a-z]+)$/.exec(p))) return adminList(ctx, m[1], form);
   if ((m = /^\/admin\/c\/([a-z]+)\/new$/.exec(p))) return adminEdit(ctx, m[1], null, form);
   if ((m = /^\/admin\/c\/([a-z]+)\/(\d+)$/.exec(p))) return adminEdit(ctx, m[1], Number(m[2]), form);
@@ -582,6 +754,8 @@ async function handle(req, res) {
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
     if (p === '/' && (req.method === 'GET' || req.method === 'HEAD')) return await pageIndex(ctx);
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
+    if (p === '/program' && (req.method === 'GET' || req.method === 'HEAD')) return await pageProgram(ctx);
+    if (p === '/program/done' && req.method === 'POST') return await postWodDone(ctx);
     if (p === '/privacy' || p === '/consent' || p === '/requisites') {
       const s = await getSettings();
       s._root = SITE_URL;
@@ -604,7 +778,7 @@ async function handle(req, res) {
     }
     if (p === '/sitemap.xml') {
       const r = SITE_URL;
-      const urls = [['', '1.0', 'weekly'], ['privacy', '0.2', 'yearly'], ['consent', '0.2', 'yearly'], ['requisites', '0.2', 'yearly']];
+      const urls = [['', '1.0', 'weekly'], ['program', '0.8', 'daily'], ['privacy', '0.2', 'yearly'], ['consent', '0.2', 'yearly'], ['requisites', '0.2', 'yearly']];
       return ctx.text(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(([u, pr, f]) => `<url><loc>${r}${u}</loc><changefreq>${f}</changefreq><priority>${pr}</priority></url>`).join('')}</urlset>`, 200, 'application/xml');
     }
     if (p === '/favicon.ico') return ctx.redirect('/static/img/favicon-32.png');

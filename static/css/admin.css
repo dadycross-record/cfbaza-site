@@ -71,3 +71,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); bo
   td.hide-sm, th.hide-sm { display: none; }
 }
 .field small { font-weight: 400; }
+.wod-preview { background: #292929; color: #FFF; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.wod-preview h4 { font-family: Oswald, 'Arial Narrow', sans-serif; text-transform: uppercase; color: #FECC00; margin: 0 0 6px; font-size: 16px; }
+.wod-preview ul { margin: 0; padding-left: 18px; }
+.wod-preview li.rest { color: #BDBDBD; font-style: italic; }
