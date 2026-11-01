@@ -560,6 +560,7 @@ async function handleAdmin(ctx) {
 async function handle(req, res) {
   const ctx = new Ctx(req, res);
   const p = ctx.path;
+  let m0;
   const host = reqHost(req);
   const isMainHost = host === SITE_HOST || /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
   try {
@@ -583,6 +584,13 @@ async function handle(req, res) {
       return ctx.html(V.requisitesPage(s, L.requisites(s)));
     }
     if (p.startsWith('/vendor/fonts/')) return await serveFont(ctx);
+    // Файл подтверждения прав для Яндекс.Вебмастера (код — в настройках или в списке ниже)
+    if ((m0 = /^\/yandex_([0-9a-f]{8,32})\.html$/.exec(p))) {
+      const st = await getSettings();
+      const codes = new Set(['e30b90ef8fa39d09', String(st.yandex_verification || '').trim()]);
+      if (!codes.has(m0[1])) return notFound(ctx);
+      return ctx.html(`<html>\n    <head>\n        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n    </head>\n    <body>Verification: ${m0[1]}</body>\n</html>\n`);
+    }
     if (p === '/healthz') return ctx.text('ok');
     if (p === '/robots.txt') {
       if (!isMainHost) return ctx.text('User-agent: *\nDisallow: /\n');
