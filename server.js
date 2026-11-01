@@ -263,6 +263,10 @@ function clientIp(req) {
   return xff.length ? xff[xff.length - 1] : (req.socket.remoteAddress || '');
 }
 const isHttps = (req) => String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+// Основной адрес сайта: для canonical, sitemap и документов. Остальные адреса (временный pipecore, www) поисковикам не показываем.
+const SITE_URL = (process.env.SITE_URL || 'https://cf-baza.ru/').replace(/\/?$/, '/');
+const SITE_HOST = new URL(SITE_URL).host;
+const reqHost = (req) => String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
 const rootUrl = (req) => `${isHttps(req) ? 'https' : 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'cf-baza.ru'}/`;
 
 const MIME = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webp': 'image/webp', '.txt': 'text/plain; charset=utf-8' };
@@ -338,7 +342,7 @@ async function pageIndex(ctx) {
   const s = await getSettings();
   const slots = await getItems('slot');
   const data = {
-    s, root: rootUrl(ctx.req),
+    s, root: SITE_URL,
     facts: await getItems('fact'), steps: await getItems('step'), whys: await getItems('why'),
     photos: await getItems('photo'), schedule: buildSchedule(slots), usedTypes: new Set(slots.map((x) => x.type)),
     coaches: await getItems('coach'), evpillars: await getItems('evpillar'), evphotos: await getItems('evphoto'), plans: await getItems('plan'), extras: await getItems('extra'),
@@ -556,24 +560,37 @@ async function handleAdmin(ctx) {
 async function handle(req, res) {
   const ctx = new Ctx(req, res);
   const p = ctx.path;
+  const host = reqHost(req);
+  const isMainHost = host === SITE_HOST || /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
   try {
+    // www.cf-baza.ru → cf-baza.ru (одно «зеркало» для поисковиков)
+    if (host === 'www.' + SITE_HOST && (req.method === 'GET' || req.method === 'HEAD')) {
+      res.writeHead(301, { Location: SITE_URL.replace(/\/$/, '') + req.url });
+      return res.end();
+    }
+    // Временный адрес и прочие хосты работают, но не индексируются — чтобы в поиске был только cf-baza.ru
+    if (!isMainHost) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     if (p.startsWith('/static/')) return await serveStatic(ctx);
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
-    if (p === '/' && req.method === 'GET') return await pageIndex(ctx);
+    if (p === '/' && (req.method === 'GET' || req.method === 'HEAD')) return await pageIndex(ctx);
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
     if (p === '/privacy' || p === '/consent' || p === '/requisites') {
       const s = await getSettings();
-      s._root = rootUrl(req);
+      s._root = SITE_URL;
       if (p === '/privacy') return ctx.html(V.legalDoc(s, L.policy(s)));
       if (p === '/consent') return ctx.html(V.legalDoc(s, L.consent(s)));
       return ctx.html(V.requisitesPage(s, L.requisites(s)));
     }
     if (p.startsWith('/vendor/fonts/')) return await serveFont(ctx);
     if (p === '/healthz') return ctx.text('ok');
-    if (p === '/robots.txt') return ctx.text(`User-agent: *\nDisallow: /admin\nSitemap: ${rootUrl(req)}sitemap.xml\n`);
+    if (p === '/robots.txt') {
+      if (!isMainHost) return ctx.text('User-agent: *\nDisallow: /\n');
+      return ctx.text(`User-agent: *\nDisallow: /admin\nDisallow: /lead\nSitemap: ${SITE_URL}sitemap.xml\n`);
+    }
     if (p === '/sitemap.xml') {
-      const r = rootUrl(req);
-      return ctx.text(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${r}</loc></url><url><loc>${r}privacy</loc></url></urlset>`, 200, 'application/xml');
+      const r = SITE_URL;
+      const urls = [['', '1.0', 'weekly'], ['privacy', '0.2', 'yearly'], ['consent', '0.2', 'yearly'], ['requisites', '0.2', 'yearly']];
+      return ctx.text(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(([u, pr, f]) => `<url><loc>${r}${u}</loc><changefreq>${f}</changefreq><priority>${pr}</priority></url>`).join('')}</urlset>`, 200, 'application/xml');
     }
     if (p === '/favicon.ico') return ctx.redirect('/static/img/favicon-32.png');
     if (p === '/admin' || p.startsWith('/admin/')) return await handleAdmin(ctx);
