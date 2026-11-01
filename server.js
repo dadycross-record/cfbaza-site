@@ -264,7 +264,7 @@ function clientIp(req) {
 }
 const isHttps = (req) => String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 // Основной адрес сайта: для canonical, sitemap и документов. Остальные адреса (временный pipecore, www) поисковикам не показываем.
-const SITE_URL = (process.env.SITE_URL || 'https://cf-baza.ru/').replace(/\/?$/, '/');
+const SITE_URL = (process.env.SITE_URL || 'https://www.cf-baza.ru/').replace(/\/?$/, '/');
 const SITE_HOST = new URL(SITE_URL).host;
 const reqHost = (req) => String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
 const rootUrl = (req) => `${isHttps(req) ? 'https' : 'http'}://${req.headers['x-forwarded-host'] || req.headers.host || 'cf-baza.ru'}/`;
@@ -563,8 +563,9 @@ async function handle(req, res) {
   const host = reqHost(req);
   const isMainHost = host === SITE_HOST || /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
   try {
-    // www.cf-baza.ru → cf-baza.ru (одно «зеркало» для поисковиков)
-    if (host === 'www.' + SITE_HOST && (req.method === 'GET' || req.method === 'HEAD')) {
+    // Второй вариант адреса (с www или без) → основной, чтобы у поисковиков было одно «зеркало»
+    const altHost = SITE_HOST.startsWith('www.') ? SITE_HOST.slice(4) : 'www.' + SITE_HOST;
+    if (host === altHost && (req.method === 'GET' || req.method === 'HEAD')) {
       res.writeHead(301, { Location: SITE_URL.replace(/\/$/, '') + req.url });
       return res.end();
     }
