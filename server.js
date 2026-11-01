@@ -157,6 +157,12 @@ async function init() {
     }
     await setSetting('_rukovodstvo_v1', '1');
   }
+  // Разовое подключение счётчика Яндекс.Метрики (если номер ещё не указан в админке)
+  if (!(await db.get("SELECT value FROM settings WHERE key='_metrika_v1'"))) {
+    const cur = await db.get("SELECT value FROM settings WHERE key='metrika_id'");
+    if (!cur || !String(cur.value || '').trim()) await setSetting('metrika_id', '113979373');
+    await setSetting('_metrika_v1', '1');
+  }
   // Пароль админки берётся из ADMIN_PASSWORD. Если переменную поменяли — пароль в базе обновится при запуске.
   // Пароль, сменённый в самой админке, сохраняется, пока ADMIN_PASSWORD не изменится.
   const envPwd = process.env.ADMIN_PASSWORD;
