@@ -429,3 +429,41 @@ p { margin: 0; }
 .prog-more { margin-top: 28px; }
 @media (max-width: 560px) { .wod-author { margin-left: 0; width: 100%; } .pd-strip { top: 104px; } }
 @media (min-width: 1201px) and (max-width: 1500px) { .nav { gap: 16px; font-size: 14px; } .prog-link { padding: 0 14px; font-size: 14px; } .header .btn { padding: 0 14px; font-size: 14px; } }
+
+/* Профиль атлета, результаты, рейтинг */
+.ath-name { font-weight: 700; color: var(--accent); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.my-total { text-decoration: none; color: inherit; }
+a.my-total u { color: var(--accent); text-decoration: none; }
+.res-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.res-form input[name=result] { flex: 1 1 240px; min-width: 0; min-height: 44px; border-radius: 10px; border: 1px solid #4A4A4A; background: var(--bg); color: var(--text); padding: 0 14px; font: inherit; font-size: 15px; }
+.res-form .sc { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; color: var(--muted); }
+.res-form .btn { min-height: 44px; }
+.res-form small { width: 100%; color: var(--muted); font-size: 13px; }
+.linkbtn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.wod-res summary { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 15px; }
+.wod-res ol { margin: 10px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
+.wod-res li { display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.wod-res li span { min-width: 140px; }
+.wod-res li i { font-size: 12px; color: var(--muted); font-style: normal; text-transform: uppercase; }
+.wod-res li.me span { color: var(--accent); font-weight: 700; }
+.login-card { max-width: 420px; text-align: left; }
+.login-tabs { display: flex; gap: 6px; background: var(--bg); padding: 4px; border-radius: 50px; }
+.login-tabs button { flex: 1; min-height: 38px; border: 0; border-radius: 50px; background: transparent; color: var(--muted); font: inherit; font-weight: 700; cursor: pointer; }
+.login-tabs button.on { background: var(--accent); color: var(--ink); }
+.lf { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }
+.lf input { min-height: 46px; border-radius: 10px; border: 1px solid #4A4A4A; background: var(--bg); color: var(--text); padding: 0 14px; font: inherit; font-size: 16px; }
+.login-card .consent { display: flex; gap: 8px; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.login-card .consent a { color: var(--accent); }
+.login-err { color: #FF8A7A; margin: 0; font-size: 14px; }
+.rate-nav { display: flex; align-items: center; gap: 16px; margin: 24px 0 12px; }
+.rate-nav b { font-family: var(--display); font-size: 24px; text-transform: uppercase; min-width: 180px; text-align: center; }
+.rate { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
+.rate li { display: grid; grid-template-columns: 40px 1fr auto; gap: 4px 12px; align-items: center; background: var(--card); border-radius: 12px; padding: 12px 16px; }
+.rate .pos { font-family: var(--display); font-size: 20px; color: var(--muted); }
+.rate li:nth-child(-n+3) .pos { color: var(--accent); }
+.rate .nm { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.rate b { font-family: var(--display); font-size: 24px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.rate small { grid-column: 2 / 4; color: var(--muted); font-size: 12.5px; }
+.rate small:empty { display: none; }
+.rate li.me { outline: 2px solid var(--accent); }
+@media (max-width: 560px) { .prog .header-cta .btn-accent { display: none; } }

@@ -34,6 +34,10 @@ const timeNum = (t) => Number(String(t || '').replace(/\D/g, '')) || 0;
 // ---------------------------------------------------------------------------
 async function init() {
   await db.exec(db.schema);
+  // новые колонки (для уже созданных таблиц)
+  for (const col of ["result TEXT NOT NULL DEFAULT ''", 'scaled INTEGER NOT NULL DEFAULT 0', 'updated TEXT']) {
+    try { await db.exec(`ALTER TABLE wod_done ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}${col}`); } catch { /* колонка уже есть */ }
+  }
   for (const [k, v] of Object.entries(C.SETTINGS_DEFAULTS)) {
     await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', [k, v]);
   }
@@ -429,6 +433,25 @@ function deviceId(ctx) {
   return id;
 }
 
+// Кто отмечает: атлет с профилем ('a<id>') или браузер без профиля (случайный id в cookie)
+async function currentAthlete(ctx) {
+  const id = Number(ctx.session.ath || 0);
+  if (!id) return null;
+  const a = await db.get('SELECT id, name FROM athletes WHERE id=$1', [id]);
+  if (!a) { delete ctx.session.ath; ctx.sessionDirty = true; }
+  return a || null;
+}
+const whoOf = (ctx, ath) => (ath ? 'a' + ath.id : deviceId(ctx));
+
+async function athleteNames(keys) {
+  const ids = [...new Set(keys.filter((k) => /^a\d+$/.test(k)).map((k) => Number(k.slice(1))))];
+  const map = {};
+  if (!ids.length) return map;
+  const ph = ids.map((_, i) => `$${i + 1}`).join(',');
+  for (const r of await db.all(`SELECT id, name FROM athletes WHERE public=1 AND id IN (${ph})`, ids)) map['a' + r.id] = r.name;
+  return map;
+}
+
 async function pageProgram(ctx) {
   const s = await getSettings();
   const track = TRACK_SLUGS.has(ctx.url.searchParams.get('t')) ? ctx.url.searchParams.get('t') : TRACKS[0].slug;
@@ -439,38 +462,119 @@ async function pageProgram(ctx) {
   const days = await db.all(`SELECT DISTINCT wdate FROM wods WHERE active=1 AND track=$1 AND wdate <= $2${lim ? ' AND wdate < $3' : ''} ORDER BY wdate DESC LIMIT 14`, lim ? [track, maxDate, lim] : [track, maxDate]);
   let wods = [];
   if (days.length) {
-    const last = days[days.length - 1].wdate;
-    const first = days[0].wdate;
-    wods = await db.all('SELECT * FROM wods WHERE active=1 AND track=$1 AND wdate >= $2 AND wdate <= $3 ORDER BY wdate DESC, id ASC', [track, last, first]);
+    wods = await db.all('SELECT * FROM wods WHERE active=1 AND track=$1 AND wdate >= $2 AND wdate <= $3 ORDER BY wdate DESC, id ASC', [track, days[days.length - 1].wdate, days[0].wdate]);
   }
-  const dev = deviceId(ctx);
+  const ath = await currentAthlete(ctx);
+  const who = whoOf(ctx, ath);
   const ids = wods.map((w) => w.id);
-  const counts = {}; const mine = new Set();
+  const counts = {}; const mine = {}; const results = {};
   if (ids.length) {
     const ph = ids.map((_, i) => `$${i + 1}`).join(',');
     for (const r of await db.all(`SELECT wod_id, COUNT(*) AS n FROM wod_done WHERE wod_id IN (${ph}) GROUP BY wod_id`, ids)) counts[r.wod_id] = Number(r.n);
-    for (const r of await db.all(`SELECT wod_id FROM wod_done WHERE device=$${ids.length + 1} AND wod_id IN (${ph})`, [...ids, dev])) mine.add(Number(r.wod_id));
+    for (const r of await db.all(`SELECT wod_id, result, scaled FROM wod_done WHERE device=$${ids.length + 1} AND wod_id IN (${ph})`, [...ids, who])) mine[r.wod_id] = { result: r.result || '', scaled: Number(r.scaled) || 0 };
+    const res = await db.all(`SELECT wod_id, device, result, scaled FROM wod_done WHERE wod_id IN (${ph}) AND device LIKE 'a%' AND result <> '' ORDER BY updated DESC`, ids);
+    const names = await athleteNames(res.map((r) => r.device));
+    for (const r of res) if (names[r.device]) (results[r.wod_id] = results[r.wod_id] || []).push({ name: names[r.device], result: r.result, scaled: Number(r.scaled) || 0, me: r.device === who });
   }
   const totals = {};
   for (const r of await db.all('SELECT track, COUNT(*) AS n FROM wods WHERE active=1 AND wdate <= $1 GROUP BY track', [maxDate])) totals[r.track] = Number(r.n);
-  const myTotal = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [dev])).n);
+  const myTotal = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [who])).n);
   const more = days.length === 14 ? days[days.length - 1].wdate : null;
-  ctx.html(V.programPage({ s, root: SITE_URL, tracks: TRACKS, track, wods: wods.map((w) => ({ ...w, blocks: W.toBlocks(w.body), done: counts[w.id] || 0, mine: mine.has(w.id) })), totals, myTotal, more, today: today() }));
+  ctx.html(V.programPage({
+    s, root: SITE_URL, tracks: TRACKS, track, totals, myTotal, more, today: today(), athlete: ath, csrf: ctx.session.csrf,
+    wods: wods.map((w) => ({ ...w, blocks: W.toBlocks(w.body), done: counts[w.id] || 0, mine: mine[w.id] || null, results: results[w.id] || [] })),
+  }));
+}
+
+async function readJson(ctx) {
+  try { return JSON.parse((await H.readBody(ctx.req)).toString('utf8') || '{}'); } catch { return null; }
 }
 
 async function postWodDone(ctx) {
-  if (rateLimited('done:' + clientIp(ctx.req), 200, 3600000)) return ctx.json({ ok: false, error: 'Слишком много отметок, попробуйте позже.' }, 429);
-  let body = {};
-  try { body = JSON.parse((await H.readBody(ctx.req)).toString('utf8') || '{}'); } catch { return ctx.json({ ok: false }, 400); }
+  if (rateLimited('done:' + clientIp(ctx.req), 300, 3600000)) return ctx.json({ ok: false, error: 'Слишком много отметок, попробуйте позже.' }, 429);
+  const body = await readJson(ctx);
+  if (!body || body.csrf !== ctx.session.csrf) return ctx.json({ ok: false, error: 'Обновите страницу и попробуйте ещё раз.' }, 400);
   const id = Number(body.id);
   const w = await db.get('SELECT id FROM wods WHERE id=$1 AND active=1', [id]);
   if (!w) return ctx.json({ ok: false }, 404);
-  const dev = deviceId(ctx);
-  if (body.on) await db.run('INSERT INTO wod_done(wod_id, device, created) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, dev, now()]);
-  else await db.run('DELETE FROM wod_done WHERE wod_id=$1 AND device=$2', [id, dev]);
+  const ath = await currentAthlete(ctx);
+  const who = whoOf(ctx, ath);
+  const result = String(body.result || '').trim().slice(0, 80);
+  const scaled = body.scaled ? 1 : 0;
+  if (body.on) {
+    await db.run('INSERT INTO wod_done(wod_id, device, created, result, scaled, updated) VALUES ($1, $2, $3, $4, $5, $3) ON CONFLICT (wod_id, device) DO UPDATE SET result=$4, scaled=$5, updated=$3', [id, who, now(), result, scaled]);
+  } else {
+    await db.run('DELETE FROM wod_done WHERE wod_id=$1 AND device=$2', [id, who]);
+  }
   const n = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE wod_id=$1', [id])).n);
-  const total = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [dev])).n);
-  return ctx.json({ ok: true, count: n, on: !!body.on, total });
+  const total = Number((await db.get('SELECT COUNT(*) AS n FROM wod_done WHERE device=$1', [who])).n);
+  return ctx.json({ ok: true, count: n, on: !!body.on, total, result, scaled, name: ath ? ath.name : '' });
+}
+
+// Профиль атлета: имя + PIN-код из 4 цифр. Отметки из браузера переносятся в профиль.
+const nameKey = (n) => String(n || '').trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+async function mergeDeviceInto(ctx, aid) {
+  const dev = deviceId(ctx);
+  const key = 'a' + aid;
+  const rows = await db.all('SELECT wod_id, result, scaled, created FROM wod_done WHERE device=$1', [dev]);
+  for (const r of rows) {
+    await db.run('INSERT INTO wod_done(wod_id, device, created, result, scaled, updated) VALUES ($1, $2, $3, $4, $5, $3) ON CONFLICT (wod_id, device) DO NOTHING', [r.wod_id, key, r.created || now(), r.result || '', Number(r.scaled) || 0]);
+  }
+  await db.run('DELETE FROM wod_done WHERE device=$1', [dev]);
+}
+
+async function postAthlete(ctx, action) {
+  const body = await readJson(ctx);
+  if (!body || body.csrf !== ctx.session.csrf) return ctx.json({ ok: false, error: 'Обновите страницу и попробуйте ещё раз.' }, 400);
+  if (action === 'logout') { delete ctx.session.ath; ctx.sessionDirty = true; return ctx.json({ ok: true }); }
+  const name = String(body.name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  const pin = String(body.pin || '').trim();
+  if (name.length < 2) return ctx.json({ ok: false, error: 'Укажите имя и фамилию — так вас узнают в рейтинге.' }, 400);
+  if (!/^\d{4}$/.test(pin)) return ctx.json({ ok: false, error: 'PIN — ровно 4 цифры.' }, 400);
+  if (rateLimited('ath:' + clientIp(ctx.req), 20, 900000)) return ctx.json({ ok: false, error: 'Слишком много попыток. Подождите 15 минут.' }, 429);
+  const key = nameKey(name);
+  const ex = await db.get('SELECT * FROM athletes WHERE name_key=$1', [key]);
+  let aid;
+  if (action === 'register') {
+    if (!body.consent) return ctx.json({ ok: false, error: 'Нужно согласие на обработку персональных данных.' }, 400);
+    if (ex) return ctx.json({ ok: false, error: 'Такое имя уже занято. Войдите или добавьте фамилию/инициал.' }, 409);
+    const r = await db.run('INSERT INTO athletes(name, name_key, pin, public, created) VALUES ($1, $2, $3, $4, $5) RETURNING id', [name, key, H.hashPassword(pin), body.public ? 1 : 0, now()]);
+    aid = Number(r.rows[0].id);
+  } else {
+    if (!ex || !H.checkPassword(pin, ex.pin)) return ctx.json({ ok: false, error: 'Неверное имя или PIN.' }, 401);
+    aid = Number(ex.id);
+  }
+  await mergeDeviceInto(ctx, aid);
+  ctx.session.ath = aid; ctx.sessionDirty = true;
+  return ctx.json({ ok: true });
+}
+
+async function pageRating(ctx) {
+  const s = await getSettings();
+  const m = /^\d{4}-\d{2}$/.test(ctx.url.searchParams.get('m') || '') ? ctx.url.searchParams.get('m') : today().slice(0, 7);
+  const rows = await db.all("SELECT device, COUNT(*) AS n, SUM(CASE WHEN result <> '' THEN 1 ELSE 0 END) AS r FROM wod_done WHERE device LIKE 'a%' AND created LIKE $1 GROUP BY device ORDER BY n DESC LIMIT 100", [m + '%']);
+  const names = await athleteNames(rows.map((r) => r.device));
+  const ath = await currentAthlete(ctx);
+  const list = rows.filter((r) => names[r.device]).map((r) => ({ name: names[r.device], n: Number(r.n), r: Number(r.r), me: ath && r.device === 'a' + ath.id }));
+  const prev = addDays(m + '-01', -1).slice(0, 7);
+  const next = addDays(m + '-28', 5).slice(0, 7);
+  ctx.html(V.ratingPage({ s, month: m, list, prev, next: next <= today().slice(0, 7) ? next : null, athlete: ath, csrf: ctx.session.csrf }));
+}
+
+async function adminAthletes(ctx, form) {
+  if (form) {
+    const id = Number(form.fields.id);
+    if (form.fields.action === 'delete' && id) {
+      await db.run('DELETE FROM wod_done WHERE device=$1', ['a' + id]);
+      await db.run('DELETE FROM athletes WHERE id=$1', [id]);
+      ctx.flash('ok', 'Профиль атлета удалён вместе с отметками.');
+    }
+    return ctx.redirect('/admin/athletes');
+  }
+  const rows = await db.all('SELECT * FROM athletes ORDER BY id DESC LIMIT 500');
+  const counts = {};
+  for (const r of await db.all("SELECT device, COUNT(*) AS n FROM wod_done WHERE device LIKE 'a%' GROUP BY device")) counts[r.device] = Number(r.n);
+  return adminRender(ctx, 'Атлеты', V.adminAthletes({ rows: rows.map((r) => ({ ...r, n: counts['a' + r.id] || 0 })), csrf: ctx.session.csrf }));
 }
 
 async function adminProgram(ctx, form) {
@@ -498,7 +602,7 @@ async function adminProgram(ctx, form) {
       const text = String(form.fields.body || '');
       if (text.trim()) list = list.concat((form.fields.split ? W.splitByDates(text, date) : [{ date, body: W.tidy(text) }]).map((w) => ({ ...w, track })));
       let image = '';
-      if (form.files.image) image = await saveUpload(form.files.image, 1600);
+      if (form.files.image && form.fields.keep_image) image = await saveUpload(form.files.image, 1600);
       if (image) {
         if (list.length === 1) list[0].image = image;
         else list.push({ date, track, body: '', image });
@@ -726,6 +830,7 @@ async function handleAdmin(ctx) {
   if (p === '/admin/leads.csv') return adminLeadsCsv(ctx);
   if (p === '/admin/password') return adminPassword(ctx, form);
   if (p === '/admin/program') return adminProgram(ctx, form);
+  if (p === '/admin/athletes') return adminAthletes(ctx, form);
   let m;
   if ((m = /^\/admin\/settings\/(\d+)$/.exec(p))) return adminSettings(ctx, Number(m[1]), form);
   if ((m = /^\/admin\/program\/(\d+)$/.exec(p))) return adminProgramEdit(ctx, Number(m[1]), form);
@@ -756,11 +861,14 @@ async function handle(req, res) {
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
     if (p === '/program' && (req.method === 'GET' || req.method === 'HEAD')) return await pageProgram(ctx);
     if (p === '/program/done' && req.method === 'POST') return await postWodDone(ctx);
-    if (p === '/privacy' || p === '/consent' || p === '/requisites') {
+    if (p === '/program/rating' && req.method === 'GET') return await pageRating(ctx);
+    if ((p === '/program/login' || p === '/program/register' || p === '/program/logout') && req.method === 'POST') return await postAthlete(ctx, p.split('/').pop());
+    if (p === '/privacy' || p === '/consent' || p === '/consent-public' || p === '/requisites') {
       const s = await getSettings();
       s._root = SITE_URL;
       if (p === '/privacy') return ctx.html(V.legalDoc(s, L.policy(s)));
       if (p === '/consent') return ctx.html(V.legalDoc(s, L.consent(s)));
+      if (p === '/consent-public') return ctx.html(V.legalDoc(s, L.publicConsent(s)));
       return ctx.html(V.requisitesPage(s, L.requisites(s)));
     }
     if (p.startsWith('/vendor/fonts/')) return await serveFont(ctx);
