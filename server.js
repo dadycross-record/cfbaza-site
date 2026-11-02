@@ -298,8 +298,9 @@ const CSP_SITE = [
   `img-src 'self' data: blob: ${YM}`,
   "font-src 'self' data:",
   `connect-src 'self' ${YM} wss://mc.yandex.ru wss://mc.yandex.com https://mc.webvisor.org https://mc.webvisor.com`,
-  `frame-src blob: ${YM} https://mc.webvisor.org https://mc.webvisor.com`,
-  `child-src blob: ${YM}`,
+  // yandex.ru — карта в «Контактах» (map-widget) и служебный фрейм Метрики
+  `frame-src blob: ${YM} https://mc.webvisor.org https://mc.webvisor.com https://yandex.ru https://*.yandex.ru https://yandex.com https://*.yandex.com https://*.yandex.net`,
+  `child-src blob: ${YM} https://yandex.ru https://*.yandex.ru`,
   "frame-ancestors 'self' https://metrika.yandex.ru https://metrica.yandex.com https://webvisor.com https://*.webvisor.com",
   "form-action 'self'", "base-uri 'self'", "object-src 'none'",
 ].join('; ');
