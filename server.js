@@ -906,6 +906,10 @@ async function handle(req, res) {
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
     if (p === '/' && (req.method === 'GET' || req.method === 'HEAD')) return await pageIndex(ctx);
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
+    if (p === '/program' || p.startsWith('/program/')) {
+      const st = await getSettings();
+      if (!st.program_public) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    }
     if (p === '/program' && (req.method === 'GET' || req.method === 'HEAD')) return await pageProgram(ctx);
     if (p === '/program/done' && req.method === 'POST') return await postWodDone(ctx);
     if (p === '/program/rating' && req.method === 'GET') return await pageRating(ctx);
@@ -935,7 +939,8 @@ async function handle(req, res) {
     }
     if (p === '/sitemap.xml') {
       const r = SITE_URL;
-      const urls = [['', '1.0', 'weekly'], ['program', '0.8', 'daily'], ['privacy', '0.2', 'yearly'], ['consent', '0.2', 'yearly'], ['requisites', '0.2', 'yearly']];
+      const st = await getSettings();
+      const urls = [['', '1.0', 'weekly'], ...(st.program_public ? [['program', '0.8', 'daily']] : []), ['privacy', '0.2', 'yearly'], ['consent', '0.2', 'yearly'], ['requisites', '0.2', 'yearly']];
       return ctx.text(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(([u, pr, f]) => `<url><loc>${r}${u}</loc><changefreq>${f}</changefreq><priority>${pr}</priority></url>`).join('')}</urlset>`, 200, 'application/xml');
     }
     if (p === '/favicon.ico') return ctx.redirect('/static/img/favicon-32.png');
