@@ -874,24 +874,84 @@ async function adminRender(ctx, title, body) {
   ctx.html(V.adminPage({ title, body, path: ctx.path, csrf: ctx.session.csrf, newLeads: n, flash: ctx.takeFlash() }));
 }
 
+// Вход в админку: по коду на почту (основной способ) или по паролю (если задан ADMIN_PASSWORD)
+const ADMIN_EMAILS = String(process.env.ADMIN_EMAIL || 'dadyfedor@yandex.ru').toLowerCase().split(/[,;\s]+/).filter(Boolean);
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+const smtpReady = () => Boolean(String(process.env.SMTP_USER || '').trim() && String(process.env.SMTP_PASSWORD || '').trim());
+
+function adminSignIn(ctx) {
+  ctx.session = { admin: true, csrf: crypto.randomBytes(16).toString('hex') };
+  ctx.sessionDirty = true;
+  const next = ctx.url.searchParams.get('next') || '';
+  return ctx.redirect(next.startsWith('/admin') ? next : '/admin');
+}
+
 async function adminLogin(ctx) {
-  let error = null;
-  if (ctx.req.method === 'POST') {
+  let error = null; let info = null;
+  let step = ctx.session.pendingEmail ? 'code' : 'email';
+  if (ctx.req.method === 'GET' && ctx.url.searchParams.get('t')) {
+    // вход по ссылке из письма
+    const row = await db.get("SELECT value FROM settings WHERE key='_login_code'");
+    const st = row ? JSON.parse(row.value || '{}') : {};
+    if (st.link && st.link === sha(ctx.url.searchParams.get('t')) && Date.now() < st.exp) {
+      await setSetting('_login_code', '{}');
+      return adminSignIn(ctx);
+    }
+    error = 'Ссылка устарела или уже использована. Запросите новый код.';
+    step = 'email';
+  } else if (ctx.req.method === 'POST') {
     const { fields } = await H.parseForm(ctx.req);
+    const a = fields.action || 'password';
     if (fields.csrf !== ctx.session.csrf) error = 'Сессия устарела, попробуйте ещё раз.';
-    else if (rateLimited('login:' + clientIp(ctx.req), 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
-    else {
-      const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
-      if (String(fields.login || '').trim().toLowerCase() === 'admin' && row && H.checkPassword(String(fields.password || ''), row.value)) {
-        ctx.session = { admin: true, csrf: crypto.randomBytes(16).toString('hex') };
-        ctx.sessionDirty = true;
-        const next = ctx.url.searchParams.get('next') || '';
-        return ctx.redirect(next.startsWith('/admin') ? next : '/admin');
+    else if (a === 'reset') { delete ctx.session.pendingEmail; ctx.sessionDirty = true; step = 'email'; }
+    else if (a === 'send') {
+      const email = String(fields.email || '').trim().toLowerCase();
+      if (rateLimited('mailcode:' + clientIp(ctx.req), 5, 900000)) error = 'Слишком много запросов. Подождите 15 минут.';
+      else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) error = 'Проверьте адрес почты.';
+      else if (!smtpReady()) error = 'Отправка писем на сервере ещё не настроена (нужны SMTP_USER и SMTP_PASSWORD в Pipecore).';
+      else {
+        if (ADMIN_EMAILS.includes(email)) {
+          const code = String(crypto.randomInt(100000, 1000000));
+          const token = crypto.randomBytes(24).toString('hex');
+          await setSetting('_login_code', JSON.stringify({ code: sha(code), link: sha(token), exp: Date.now() + 15 * 60000, tries: 0 }));
+          const link = `${rootUrl(ctx.req)}admin/login?t=${token}`;
+          const text = `Код для входа в админку CF BAZA: ${code}\n\nИли просто нажмите на ссылку:\n${link}\n\nКод и ссылка действуют 15 минут. Если вы не запрашивали вход — ничего не делайте, без кода войти нельзя.`;
+          try {
+            await sendMail({ host: process.env.SMTP_HOST || 'smtp.yandex.ru', port: process.env.SMTP_PORT || 465, user: String(process.env.SMTP_USER).trim(), pass: String(process.env.SMTP_PASSWORD).replace(/\s+/g, ''), to: [email], subject: `Код входа CF BAZA: ${code}`, text });
+          } catch (err) {
+            console.error('login mail error:', err.message);
+            error = 'Не удалось отправить письмо. Проверьте настройки почты сайта (SMTP) и попробуйте ещё раз.';
+          }
+        }
+        if (!error) { ctx.session.pendingEmail = email; ctx.sessionDirty = true; step = 'code'; info = `Если ${email} — адрес администратора, на него пришло письмо с кодом. Проверьте и папку «Спам».`; }
       }
-      error = 'Неверный логин или пароль.';
+    } else if (a === 'code') {
+      const row = await db.get("SELECT value FROM settings WHERE key='_login_code'");
+      const st = row ? JSON.parse(row.value || '{}') : {};
+      const code = String(fields.code || '').replace(/\D/g, '');
+      if (!st.code || Date.now() > st.exp) { error = 'Код устарел. Запросите новый.'; }
+      else if (st.tries >= 5) { error = 'Слишком много неверных попыток. Запросите новый код.'; }
+      else if (sha(code) === st.code && ADMIN_EMAILS.includes(ctx.session.pendingEmail)) {
+        await setSetting('_login_code', '{}');
+        return adminSignIn(ctx);
+      } else {
+        st.tries = (st.tries || 0) + 1;
+        await setSetting('_login_code', JSON.stringify(st));
+        error = 'Неверный код.';
+      }
+      step = 'code';
+    } else if (a === 'password') {
+      step = 'password';
+      if (rateLimited('login:' + clientIp(ctx.req), 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
+      else {
+        const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
+        if (row && H.checkPassword(String(fields.password || ''), row.value)) return adminSignIn(ctx);
+        error = 'Неверный пароль.';
+      }
     }
   }
-  ctx.html(V.login({ csrf: ctx.session.csrf, error }));
+  if (ctx.url.searchParams.get('by') === 'password') step = 'password';
+  ctx.html(V.login({ csrf: ctx.session.csrf, error, info, step, email: ctx.session.pendingEmail || '', next: ctx.url.searchParams.get('next') || '' }));
 }
 
 async function adminLeads(ctx, form) {

@@ -145,3 +145,7 @@ input[type=date] { font: inherit; padding: 9px 12px; border: 1px solid #CFCFC8; 
 .log div { white-space: pre-wrap; }
 form.edit.flat { padding: 0; max-width: none; }
 @media (max-width: 860px) { .crm-grid, .row2 { grid-template-columns: 1fr; } }
+.login-box { background: #FFF; border-radius: 14px; padding: 32px; width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 16px; }
+.login .login-box form { padding: 0; max-width: none; background: none; border-radius: 0; }
+.login-alt { margin: 0; text-align: center; font-size: 14px; }
+.login-alt a, .login-alt button { color: var(--muted); background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; }
