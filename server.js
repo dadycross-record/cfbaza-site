@@ -288,6 +288,33 @@ function clientIp(req) {
   const xff = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
   return xff.length ? xff[xff.length - 1] : (req.socket.remoteAddress || '');
 }
+// Политика безопасности контента: страница может грузить код и данные только с нашего сайта и Яндекс.Метрики.
+// frame-ancestors разрешает показывать сайт внутри Метрики (Вебвизор), но не на чужих сайтах.
+const YM = 'https://mc.yandex.ru https://mc.yandex.com';
+const CSP_SITE = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline' ${YM} https://yastatic.net`,
+  "style-src 'self' 'unsafe-inline'",
+  `img-src 'self' data: blob: ${YM}`,
+  "font-src 'self' data:",
+  `connect-src 'self' ${YM} wss://mc.yandex.ru wss://mc.yandex.com https://mc.webvisor.org https://mc.webvisor.com`,
+  `frame-src blob: ${YM} https://mc.webvisor.org https://mc.webvisor.com`,
+  `child-src blob: ${YM}`,
+  "frame-ancestors 'self' https://metrika.yandex.ru https://metrica.yandex.com https://webvisor.com https://*.webvisor.com",
+  "form-action 'self'", "base-uri 'self'", "object-src 'none'",
+].join('; ');
+// В админке — распознавание скриншотов (tesseract.js с jsdelivr), встроить админку никуда нельзя
+const CSP_ADMIN = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net",
+  "worker-src 'self' blob: https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' blob: data: https://cdn.jsdelivr.net https://tessdata.projectnaptha.com",
+  "frame-ancestors 'none'", "form-action 'self'", "base-uri 'self'", "object-src 'none'",
+].join('; ');
+
 const isHttps = (req) => String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 // Основной адрес сайта: для canonical, sitemap и документов. Остальные адреса (временный pipecore, www) поисковикам не показываем.
 const SITE_URL = (process.env.SITE_URL || 'https://www.cf-baza.ru/').replace(/\/?$/, '/');
@@ -311,12 +338,17 @@ class Ctx {
   flash(cat, msg) { (this.session.flash = this.session.flash || []).push([cat, msg]); this.sessionDirty = true; }
   takeFlash() { const f = this.session.flash || []; if (f.length) { delete this.session.flash; this.sessionDirty = true; } return f; }
   headers(extra = {}) {
-    const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', ...extra };
-    if (this.path.startsWith('/admin')) { h['X-Frame-Options'] = 'DENY'; h['Cache-Control'] = 'no-store'; }
+    const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()', ...extra };
+    const https = isHttps(this.req);
+    if (https) h['Strict-Transport-Security'] = 'max-age=31536000';
+    const isAdmin = this.path.startsWith('/admin');
+    if (/text\/html/.test(h['Content-Type'] || '')) h['Content-Security-Policy'] = (isAdmin ? CSP_ADMIN : CSP_SITE) + (https ? '; upgrade-insecure-requests' : '');
+    if (isAdmin) { h['X-Frame-Options'] = 'DENY'; h['Cache-Control'] = 'no-store'; }
     const cookies = [...(this.extraCookies || [])];
     if (this.sessionDirty) {
-      this.session._exp = Date.now() + 14 * 24 * 3600 * 1000;
-      cookies.push(`cfb=${encodeURIComponent(codec.encode(this.session))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${isHttps(this.req) ? '; Secure' : ''}`);
+      const ttl = this.session.admin ? Math.max(60000, (this.session.adminSince || 0) + 7 * 24 * 3600 * 1000 - Date.now()) : 14 * 24 * 3600 * 1000;
+      this.session._exp = Date.now() + ttl;
+      cookies.push(`cfb=${encodeURIComponent(codec.encode(this.session))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(ttl / 1000)}${isHttps(this.req) ? '; Secure' : ''}`);
     }
     if (cookies.length) h['Set-Cookie'] = cookies;
     return h;
@@ -861,7 +893,7 @@ async function adminCrmCsv(ctx) {
 
 // Личный кабинет: администратора ведём в админку, остальным — заглушка «в разработке»
 async function pageCabinet(ctx) {
-  if (ctx.session.admin) return ctx.redirect('/admin');
+  if (await isAdmin(ctx)) return ctx.redirect('/admin');
   ctx.res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   return ctx.html(V.cabinetPage({ s: await getSettings() }));
 }
@@ -879,8 +911,21 @@ const ADMIN_EMAILS = String(process.env.ADMIN_EMAIL || 'dadyfedor@yandex.ru').to
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const smtpReady = () => Boolean(String(process.env.SMTP_USER || '').trim() && String(process.env.SMTP_PASSWORD || '').trim());
 
-function adminSignIn(ctx) {
-  ctx.session = { admin: true, csrf: crypto.randomBytes(16).toString('hex') };
+// Сессия администратора живёт 7 дней; «Выйти на всех устройствах» меняет _admin_ver — все старые входы перестают действовать
+const ADMIN_TTL = 7 * 24 * 3600 * 1000;
+const adminVer = async () => { const r = await db.get("SELECT value FROM settings WHERE key='_admin_ver'"); return r ? r.value : '0'; };
+async function isAdmin(ctx) {
+  const s = ctx.session;
+  if (!s.admin) return false;
+  if (!s.adminSince || Date.now() - s.adminSince > ADMIN_TTL || s.adminVer !== await adminVer()) {
+    ctx.session = { csrf: crypto.randomBytes(16).toString('hex') }; ctx.sessionDirty = true;
+    return false;
+  }
+  return true;
+}
+
+async function adminSignIn(ctx) {
+  ctx.session = { admin: true, adminSince: Date.now(), adminVer: await adminVer(), csrf: crypto.randomBytes(16).toString('hex') };
   ctx.sessionDirty = true;
   const next = ctx.url.searchParams.get('next') || '';
   return ctx.redirect(next.startsWith('/admin') ? next : '/admin');
@@ -895,7 +940,7 @@ async function adminLogin(ctx) {
     const st = row ? JSON.parse(row.value || '{}') : {};
     if (st.link && st.link === sha(ctx.url.searchParams.get('t')) && Date.now() < st.exp) {
       await setSetting('_login_code', '{}');
-      return adminSignIn(ctx);
+      return await adminSignIn(ctx);
     }
     error = 'Ссылка устарела или уже использована. Запросите новый код.';
     step = 'email';
@@ -933,7 +978,7 @@ async function adminLogin(ctx) {
       else if (st.tries >= 5) { error = 'Слишком много неверных попыток. Запросите новый код.'; }
       else if (sha(code) === st.code && ADMIN_EMAILS.includes(ctx.session.pendingEmail)) {
         await setSetting('_login_code', '{}');
-        return adminSignIn(ctx);
+        return await adminSignIn(ctx);
       } else {
         st.tries = (st.tries || 0) + 1;
         await setSetting('_login_code', JSON.stringify(st));
@@ -945,7 +990,7 @@ async function adminLogin(ctx) {
       if (rateLimited('login:' + clientIp(ctx.req), 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
       else {
         const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
-        if (row && H.checkPassword(String(fields.password || ''), row.value)) return adminSignIn(ctx);
+        if (row && H.checkPassword(String(fields.password || ''), row.value)) return await adminSignIn(ctx);
         error = 'Неверный пароль.';
       }
     }
@@ -1071,22 +1116,28 @@ async function adminEdit(ctx, kind, itemId, form) {
 }
 
 async function adminPassword(ctx, form) {
+  const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
+  if (form && form.fields.action === 'logout_all') {
+    await setSetting('_admin_ver', crypto.randomBytes(8).toString('hex'));
+    ctx.session = { csrf: crypto.randomBytes(16).toString('hex') }; ctx.sessionDirty = true;
+    return ctx.redirect('/admin/login');
+  }
   if (form) {
-    const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
     const { old = '', new: nw = '', new2 = '' } = form.fields;
-    if (!H.checkPassword(old, row.value)) ctx.flash('error', 'Текущий пароль указан неверно.');
+    if (!row || !H.checkPassword(old, row.value)) ctx.flash('error', 'Текущий пароль указан неверно.');
     else if (nw.length < 8) ctx.flash('error', 'Новый пароль — минимум 8 символов.');
     else if (nw !== new2) ctx.flash('error', 'Пароли не совпадают.');
     else { await setSetting('_admin_hash', H.hashPassword(nw)); ctx.flash('ok', 'Пароль изменён.'); }
     return ctx.redirect('/admin/password');
   }
-  return adminRender(ctx, 'Пароль', V.passwordPage({ csrf: ctx.session.csrf }));
+  const left = Math.max(0, Math.ceil((ctx.session.adminSince + ADMIN_TTL - Date.now()) / 86400000));
+  return adminRender(ctx, 'Безопасность', V.passwordPage({ csrf: ctx.session.csrf, hasPassword: Boolean(row), emails: ADMIN_EMAILS, left }));
 }
 
 async function handleAdmin(ctx) {
   const p = ctx.path;
   if (p === '/admin/login') return adminLogin(ctx);
-  if (!ctx.session.admin) return ctx.redirect('/admin/login?next=' + encodeURIComponent(p));
+  if (!(await isAdmin(ctx))) return ctx.redirect('/admin/login?next=' + encodeURIComponent(p));
   let form = null;
   if (ctx.req.method === 'POST') {
     form = await H.parseForm(ctx.req);
