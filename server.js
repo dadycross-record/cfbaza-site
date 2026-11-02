@@ -38,6 +38,7 @@ async function init() {
   for (const col of ["result TEXT NOT NULL DEFAULT ''", 'scaled INTEGER NOT NULL DEFAULT 0', 'updated TEXT']) {
     try { await db.exec(`ALTER TABLE wod_done ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}${col}`); } catch { /* колонка уже есть */ }
   }
+  try { await db.exec(`ALTER TABLE leads ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}client_id INTEGER`); } catch { /* колонка уже есть */ }
   for (const [k, v] of Object.entries(C.SETTINGS_DEFAULTS)) {
     await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', [k, v]);
   }
@@ -395,7 +396,8 @@ async function postLead(ctx) {
   if (!fields.consent) return fail('Нужно согласие на обработку персональных данных.');
   if (rateLimited('lead:' + clientIp(ctx.req), 5, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
   const created = now();
-  await db.run('INSERT INTO leads(created, name, phone, interest, ip) VALUES ($1, $2, $3, $4, $5)', [created, name, phone, interest, clientIp(ctx.req)]);
+  const ins = await db.run('INSERT INTO leads(created, name, phone, interest, ip) VALUES ($1, $2, $3, $4, $5) RETURNING id', [created, name, phone, interest, clientIp(ctx.req)]);
+  try { await crmFromLead({ id: ins.rows[0] && ins.rows[0].id, created, name, phone, interest, status: 'new' }); } catch (err) { console.error('crm:', err.message); }
   const s = await getSettings();
   const body = `Новая заявка с сайта CF BAZA\n\nИмя: ${name || '—'}\nТелефон: ${phone}\nИнтерес: ${interest || '—'}\nВремя: ${created}\n\nВсе заявки: ${rootUrl(ctx.req)}admin/leads`;
   notifyTelegram(body);
@@ -703,6 +705,167 @@ async function adminProgramEdit(ctx, id, form) {
   return adminRender(ctx, 'Тренировка', V.adminProgramEdit({ w: { ...w, blocks: W.toBlocks(w.body) }, tracks: TRACKS, csrf: ctx.session.csrf }));
 }
 
+
+// ---------------------------------------------------------------------------
+// CRM: клиентская база копится сама — каждая заявка с сайта попадает в карточку клиента (по номеру телефона)
+// ---------------------------------------------------------------------------
+const CRM_STATUS = C.CRM_STATUS;
+const CRM_SOURCE = C.CRM_SOURCE;
+const phoneKey = (p) => String(p || '').replace(/\D/g, '').slice(-10);
+const crmLog = (clientId, kind, text, at) => db.run('INSERT INTO crm_log(client_id, created, kind, text) VALUES ($1, $2, $3, $4)', [clientId, at || now(), kind, text]);
+
+async function crmFromLead(l) {
+  const key = phoneKey(l.phone);
+  if (key.length < 10) return null;
+  let c = await db.get('SELECT * FROM clients WHERE phone_key=$1 ORDER BY id LIMIT 1', [key]);
+  const what = `Заявка с сайта${l.interest ? ': ' + l.interest : ''}`;
+  if (!c) {
+    const r = await db.run("INSERT INTO clients(name, phone, phone_key, status, source, created, updated) VALUES ($1, $2, $3, $4, 'site', $5, $5) RETURNING id",
+      [l.name || '', l.phone, key, l.status === 'done' ? 'contact' : 'new', l.created]);
+    c = { id: r.rows[0].id };
+  } else {
+    await db.run("UPDATE clients SET updated=$1, name=CASE WHEN name='' THEN $2 ELSE name END, status=CASE WHEN status='lost' THEN 'new' ELSE status END WHERE id=$3", [l.created, l.name || '', c.id]);
+  }
+  await crmLog(c.id, 'lead', what, l.created);
+  if (l.id) await db.run('UPDATE leads SET client_id=$1 WHERE id=$2', [c.id, l.id]);
+  return c.id;
+}
+
+async function crmBackfill() {
+  if (await db.get("SELECT value FROM settings WHERE key='_crm_v1'")) return;
+  for (const l of await db.all('SELECT * FROM leads WHERE client_id IS NULL ORDER BY id')) await crmFromLead(l);
+  await setSetting('_crm_v1', '1');
+}
+
+const dayStr = (offsetDays = 0) => new Date(Date.now() + 8 * 3600 * 1000 + offsetDays * 86400000).toISOString().slice(0, 10);
+
+async function adminDash(ctx) {
+  const today = dayStr(0);
+  const cnt = async (sql, params = []) => Number((await db.get(sql, params)).n);
+  const leads = {
+    today: await cnt('SELECT COUNT(*) AS n FROM leads WHERE created >= $1', [today]),
+    week: await cnt('SELECT COUNT(*) AS n FROM leads WHERE created >= $1', [dayStr(-6)]),
+    month: await cnt('SELECT COUNT(*) AS n FROM leads WHERE created >= $1', [dayStr(-29)]),
+    all: await cnt('SELECT COUNT(*) AS n FROM leads'),
+    fresh: await cnt("SELECT COUNT(*) AS n FROM leads WHERE status='new'"),
+  };
+  const byDay = {};
+  for (const r of await db.all('SELECT substr(created, 1, 10) AS d, COUNT(*) AS n FROM leads WHERE created >= $1 GROUP BY substr(created, 1, 10)', [dayStr(-29)])) byDay[r.d] = Number(r.n);
+  const days = Array.from({ length: 30 }, (_, i) => { const d = dayStr(i - 29); return { d, n: byDay[d] || 0 }; });
+  const funnel = {};
+  for (const r of await db.all('SELECT status, COUNT(*) AS n FROM clients GROUP BY status')) funnel[r.status] = Number(r.n);
+  const interests = (await db.all("SELECT interest, COUNT(*) AS n FROM leads WHERE created >= $1 GROUP BY interest ORDER BY COUNT(*) DESC LIMIT 6", [dayStr(-89)]))
+    .map((r) => ({ name: r.interest || 'не указано', n: Number(r.n) }));
+  const clients = {
+    all: await cnt('SELECT COUNT(*) AS n FROM clients'),
+    month: await cnt('SELECT COUNT(*) AS n FROM clients WHERE created >= $1', [dayStr(-29)]),
+    members: funnel.member || 0,
+    becameMembers: await cnt("SELECT COUNT(DISTINCT client_id) AS n FROM crm_log WHERE kind='status' AND text LIKE $1 AND created >= $2", ['%→ ' + CRM_STATUS.member, dayStr(-29)]),
+  };
+  const due = await db.all("SELECT * FROM clients WHERE next_date <> '' AND next_date <= $1 AND status NOT IN ('member', 'lost') ORDER BY next_date LIMIT 20", [today]);
+  const prog = {
+    athletes: await cnt('SELECT COUNT(*) AS n FROM athletes'),
+    marks: await cnt('SELECT COUNT(*) AS n FROM wod_done WHERE created >= $1', [dayStr(-6)]),
+  };
+  const s = await getSettings();
+  return adminRender(ctx, 'Обзор', V.adminDash({ leads, days, funnel, interests, clients, due, prog, metrika: String(s.metrika_id || '').trim(), status: CRM_STATUS }));
+}
+
+async function adminCrm(ctx, form) {
+  if (form && form.fields.action === 'add') {
+    const f = form.fields;
+    const name = String(f.name || '').trim().slice(0, 80);
+    const phone = String(f.phone || '').trim().slice(0, 40);
+    if (!name && !phone) { ctx.flash('error', 'Укажите имя или телефон.'); return ctx.redirect('/admin/crm'); }
+    const key = phoneKey(phone);
+    if (key.length === 10) {
+      const ex = await db.get('SELECT id FROM clients WHERE phone_key=$1', [key]);
+      if (ex) { ctx.flash('error', 'Клиент с этим номером уже есть — открыли его карточку.'); return ctx.redirect('/admin/crm/' + ex.id); }
+    }
+    const status = CRM_STATUS[f.status] ? f.status : 'new';
+    const source = CRM_SOURCE[f.source] ? f.source : 'call';
+    const t = now();
+    const r = await db.run('INSERT INTO clients(name, phone, phone_key, status, source, note, created, updated) VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id',
+      [name, phone, key, status, source, String(f.note || '').trim().slice(0, 2000), t]);
+    await crmLog(r.rows[0].id, 'note', `Добавлен вручную (${CRM_SOURCE[source]})`, t);
+    ctx.flash('ok', 'Клиент добавлен.');
+    return ctx.redirect('/admin/crm/' + r.rows[0].id);
+  }
+  const st = ctx.url.searchParams.get('st') || '';
+  const q = String(ctx.url.searchParams.get('q') || '').trim();
+  const where = []; const params = [];
+  if (CRM_STATUS[st]) { params.push(st); where.push(`status=$${params.length}`); }
+  if (st === 'due') { params.push(dayStr(0)); where.push(`next_date <> '' AND next_date <= $${params.length} AND status NOT IN ('member', 'lost')`); }
+  if (q) {
+    const qk = q.replace(/\D/g, '');
+    params.push('%' + q.toLowerCase() + '%');
+    let w = `LOWER(name) LIKE $${params.length}`;
+    if (qk.length >= 3) { params.push('%' + qk + '%'); w += ` OR phone_key LIKE $${params.length}`; }
+    where.push('(' + w + ')');
+  }
+  const rows = await db.all(`SELECT * FROM clients${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY updated DESC, id DESC LIMIT 500`, params);
+  const counts = {};
+  for (const r of await db.all('SELECT status, COUNT(*) AS n FROM clients GROUP BY status')) counts[r.status] = Number(r.n);
+  counts.due = Number((await db.get("SELECT COUNT(*) AS n FROM clients WHERE next_date <> '' AND next_date <= $1 AND status NOT IN ('member', 'lost')", [dayStr(0)])).n);
+  return adminRender(ctx, 'Клиенты', V.adminCrm({ rows, st, q, counts, status: CRM_STATUS, source: CRM_SOURCE, today: dayStr(0), csrf: ctx.session.csrf }));
+}
+
+async function adminCrmCard(ctx, id, form) {
+  const c = await db.get('SELECT * FROM clients WHERE id=$1', [id]);
+  if (!c) return notFound(ctx);
+  if (form) {
+    const f = form.fields; const t = now();
+    if (f.action === 'delete') {
+      await db.run('DELETE FROM crm_log WHERE client_id=$1', [id]);
+      await db.run('UPDATE leads SET client_id=NULL WHERE client_id=$1', [id]);
+      await db.run('DELETE FROM clients WHERE id=$1', [id]);
+      ctx.flash('ok', 'Клиент удалён.');
+      return ctx.redirect('/admin/crm');
+    }
+    if (f.action === 'log') {
+      const text = String(f.text || '').trim().slice(0, 2000);
+      const kind = ['call', 'visit', 'note', 'pay'].includes(f.kind) ? f.kind : 'note';
+      if (text) { await crmLog(id, kind, text, t); await db.run('UPDATE clients SET updated=$1 WHERE id=$2', [t, id]); }
+      if (f.next_date !== undefined) await db.run('UPDATE clients SET next_date=$1 WHERE id=$2', [/^\d{4}-\d{2}-\d{2}$/.test(f.next_date) ? f.next_date : '', id]);
+      return ctx.redirect('/admin/crm/' + id);
+    }
+    if (f.action === 'status' && CRM_STATUS[f.status] && f.status !== c.status) {
+      await db.run('UPDATE clients SET status=$1, updated=$2 WHERE id=$3', [f.status, t, id]);
+      await crmLog(id, 'status', `${CRM_STATUS[c.status] || c.status} → ${CRM_STATUS[f.status]}`, t);
+      return ctx.redirect('/admin/crm/' + id);
+    }
+    if (f.action === 'save') {
+      const phone = String(f.phone || '').trim().slice(0, 40);
+      const status = CRM_STATUS[f.status] ? f.status : c.status;
+      await db.run('UPDATE clients SET name=$1, phone=$2, phone_key=$3, status=$4, source=$5, note=$6, next_date=$7, updated=$8 WHERE id=$9', [
+        String(f.name || '').trim().slice(0, 80), phone, phoneKey(phone), status, CRM_SOURCE[f.source] ? f.source : c.source,
+        String(f.note || '').trim().slice(0, 4000), /^\d{4}-\d{2}-\d{2}$/.test(f.next_date || '') ? f.next_date : '', t, id]);
+      if (status !== c.status) await crmLog(id, 'status', `${CRM_STATUS[c.status] || c.status} → ${CRM_STATUS[status]}`, t);
+      ctx.flash('ok', 'Сохранено.');
+      return ctx.redirect('/admin/crm/' + id);
+    }
+    return ctx.redirect('/admin/crm/' + id);
+  }
+  const log = await db.all('SELECT * FROM crm_log WHERE client_id=$1 ORDER BY created DESC, id DESC', [id]);
+  const leadsOf = await db.all('SELECT * FROM leads WHERE client_id=$1 ORDER BY id DESC', [id]);
+  return adminRender(ctx, c.name || c.phone || 'Клиент', V.adminCrmCard({ c, log, leads: leadsOf, status: CRM_STATUS, source: CRM_SOURCE, today: dayStr(0), csrf: ctx.session.csrf }));
+}
+
+async function adminCrmCsv(ctx) {
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = await db.all('SELECT * FROM clients ORDER BY id DESC');
+  const out = ['Имя;Телефон;Этап;Источник;Следующий контакт;Заметка;Создан;Обновлён',
+    ...rows.map((r) => [r.name, r.phone, CRM_STATUS[r.status] || r.status, CRM_SOURCE[r.source] || r.source, r.next_date, r.note, r.created, r.updated].map(q).join(';'))].join('\r\n');
+  ctx.text('﻿' + out, 200, 'text/csv; charset=utf-8', { 'Content-Disposition': 'attachment; filename=cfbaza-clients.csv' });
+}
+
+// Личный кабинет: администратора ведём в админку, остальным — заглушка «в разработке»
+async function pageCabinet(ctx) {
+  if (ctx.session.admin) return ctx.redirect('/admin');
+  ctx.res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  return ctx.html(V.cabinetPage({ s: await getSettings() }));
+}
+
 // ---------------------------------------------------------------------------
 // Админка
 // ---------------------------------------------------------------------------
@@ -723,7 +886,7 @@ async function adminLogin(ctx) {
         ctx.session = { admin: true, csrf: crypto.randomBytes(16).toString('hex') };
         ctx.sessionDirty = true;
         const next = ctx.url.searchParams.get('next') || '';
-        return ctx.redirect(next.startsWith('/admin') ? next : '/admin/leads');
+        return ctx.redirect(next.startsWith('/admin') ? next : '/admin');
       }
       error = 'Неверный логин или пароль.';
     }
@@ -871,7 +1034,9 @@ async function handleAdmin(ctx) {
       return ctx.html('<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif;padding:40px">Сессия устарела. <a href="javascript:history.back()">Вернитесь</a>, обновите страницу и попробуйте ещё раз.</p>', 400);
     }
   }
-  if (p === '/admin' ) return ctx.redirect('/admin/leads');
+  if (p === '/admin' || p === '/admin/') return adminDash(ctx);
+  if (p === '/admin/crm') return adminCrm(ctx, form);
+  if (p === '/admin/crm.csv') return adminCrmCsv(ctx);
   if (p === '/admin/logout' && form) { ctx.session = {}; ctx.sessionDirty = true; return ctx.redirect('/admin/login'); }
   if (p === '/admin/leads') return adminLeads(ctx, form);
   if (p === '/admin/leads.csv') return adminLeadsCsv(ctx);
@@ -881,6 +1046,7 @@ async function handleAdmin(ctx) {
   let m;
   if ((m = /^\/admin\/settings\/(\d+)$/.exec(p))) return adminSettings(ctx, Number(m[1]), form);
   if ((m = /^\/admin\/program\/(\d+)$/.exec(p))) return adminProgramEdit(ctx, Number(m[1]), form);
+  if ((m = /^\/admin\/crm\/(\d+)$/.exec(p))) return adminCrmCard(ctx, Number(m[1]), form);
   if ((m = /^\/admin\/c\/([a-z]+)$/.exec(p))) return adminList(ctx, m[1], form);
   if ((m = /^\/admin\/c\/([a-z]+)\/new$/.exec(p))) return adminEdit(ctx, m[1], null, form);
   if ((m = /^\/admin\/c\/([a-z]+)\/(\d+)$/.exec(p))) return adminEdit(ctx, m[1], Number(m[2]), form);
@@ -906,6 +1072,7 @@ async function handle(req, res) {
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
     if (p === '/' && (req.method === 'GET' || req.method === 'HEAD')) return await pageIndex(ctx);
     if (p === '/lead' && req.method === 'POST') return await postLead(ctx);
+    if ((p === '/cabinet' || p === '/cabinet/') && (req.method === 'GET' || req.method === 'HEAD')) return await pageCabinet(ctx);
     if (p === '/program' || p.startsWith('/program/')) {
       const st = await getSettings();
       if (!st.program_public) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
@@ -935,7 +1102,7 @@ async function handle(req, res) {
     if (p === '/healthz') return ctx.text('ok');
     if (p === '/robots.txt') {
       if (!isMainHost) return ctx.text('User-agent: *\nDisallow: /\n');
-      return ctx.text(`User-agent: *\nDisallow: /admin\nDisallow: /lead\nSitemap: ${SITE_URL}sitemap.xml\n`);
+      return ctx.text(`User-agent: *\nDisallow: /admin\nDisallow: /lead\nDisallow: /cabinet\nSitemap: ${SITE_URL}sitemap.xml\n`);
     }
     if (p === '/sitemap.xml') {
       const r = SITE_URL;
@@ -964,6 +1131,7 @@ async function purgeOldLeads() {
 
 async function main() {
   await init();
+  await crmBackfill();
   await purgeOldLeads();
   setInterval(purgeOldLeads, 24 * 3600 * 1000).unref();
   const port = Number(process.env.PORT || 3000);
