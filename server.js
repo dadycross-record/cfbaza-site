@@ -549,6 +549,47 @@ async function postAthlete(ctx, action) {
   return ctx.json({ ok: true });
 }
 
+// Личная страница атлета: история, серия недель, настройки профиля
+const weekKey = (iso) => { const d = new Date(iso + 'T00:00:00Z'); const wd = (d.getUTCDay() + 6) % 7; return new Date(d.getTime() - wd * 86400000).toISOString().slice(0, 10); };
+async function pageMe(ctx) {
+  const s = await getSettings();
+  const ath = await currentAthlete(ctx);
+  const who = whoOf(ctx, ath);
+  const rows = await db.all('SELECT d.wod_id, d.result, d.scaled, d.created, w.wdate, w.track, w.body FROM wod_done d JOIN wods w ON w.id=d.wod_id WHERE d.device=$1 ORDER BY w.wdate DESC, d.created DESC LIMIT 400', [who]);
+  const tname = Object.fromEntries(TRACKS.map((t) => [t.slug, t.name]));
+  const month = today().slice(0, 7);
+  const weeks = new Set(rows.map((r) => weekKey(String(r.created || r.wdate).slice(0, 10))));
+  let streak = 0;
+  for (let wk = weekKey(today()); weeks.has(wk); wk = addDays(wk, -7)) streak += 1;
+  if (!streak && weeks.has(addDays(weekKey(today()), -7))) { for (let wk = addDays(weekKey(today()), -7); weeks.has(wk); wk = addDays(wk, -7)) streak += 1; }
+  const full = ath ? await db.get('SELECT id, name, public FROM athletes WHERE id=$1', [ath.id]) : null;
+  ctx.html(V.mePage({
+    s, athlete: full, csrf: ctx.session.csrf,
+    stats: { total: rows.length, month: rows.filter((r) => String(r.created || '').startsWith(month)).length, results: rows.filter((r) => r.result).length, streak },
+    rows: rows.map((r) => ({ ...r, track: tname[r.track] || r.track, summary: W.summary(r.body) })),
+  }));
+}
+
+async function postProfile(ctx) {
+  const body = await readJson(ctx);
+  if (!body || body.csrf !== ctx.session.csrf) return ctx.json({ ok: false, error: 'Обновите страницу и попробуйте ещё раз.' }, 400);
+  const ath = await currentAthlete(ctx);
+  if (!ath) return ctx.json({ ok: false, error: 'Сначала войдите в профиль.' }, 401);
+  if (typeof body.public === 'boolean') await db.run('UPDATE athletes SET public=$1 WHERE id=$2', [body.public ? 1 : 0, ath.id]);
+  if (body.pin !== undefined && body.pin !== '') {
+    const row = await db.get('SELECT pin FROM athletes WHERE id=$1', [ath.id]);
+    if (!H.checkPassword(String(body.old_pin || ''), row.pin)) return ctx.json({ ok: false, error: 'Текущий PIN указан неверно.' }, 400);
+    if (!/^\d{4}$/.test(String(body.pin))) return ctx.json({ ok: false, error: 'Новый PIN — ровно 4 цифры.' }, 400);
+    await db.run('UPDATE athletes SET pin=$1 WHERE id=$2', [H.hashPassword(String(body.pin)), ath.id]);
+  }
+  if (body.delete === true) {
+    await db.run('DELETE FROM wod_done WHERE device=$1', ['a' + ath.id]);
+    await db.run('DELETE FROM athletes WHERE id=$1', [ath.id]);
+    delete ctx.session.ath; ctx.sessionDirty = true;
+  }
+  return ctx.json({ ok: true });
+}
+
 async function pageRating(ctx) {
   const s = await getSettings();
   const m = /^\d{4}-\d{2}$/.test(ctx.url.searchParams.get('m') || '') ? ctx.url.searchParams.get('m') : today().slice(0, 7);
@@ -564,6 +605,12 @@ async function pageRating(ctx) {
 async function adminAthletes(ctx, form) {
   if (form) {
     const id = Number(form.fields.id);
+    if (form.fields.action === 'pin' && id) {
+      const pin = String(crypto.randomInt(1000, 10000));
+      await db.run('UPDATE athletes SET pin=$1 WHERE id=$2', [H.hashPassword(pin), id]);
+      const a = await db.get('SELECT name FROM athletes WHERE id=$1', [id]);
+      ctx.flash('ok', `Новый PIN для «${a ? a.name : ''}»: ${pin}. Передайте его атлету — он сможет сменить PIN в «Моих тренировках».`);
+    }
     if (form.fields.action === 'delete' && id) {
       await db.run('DELETE FROM wod_done WHERE device=$1', ['a' + id]);
       await db.run('DELETE FROM athletes WHERE id=$1', [id]);
@@ -862,6 +909,8 @@ async function handle(req, res) {
     if (p === '/program' && (req.method === 'GET' || req.method === 'HEAD')) return await pageProgram(ctx);
     if (p === '/program/done' && req.method === 'POST') return await postWodDone(ctx);
     if (p === '/program/rating' && req.method === 'GET') return await pageRating(ctx);
+    if (p === '/program/me' && req.method === 'GET') return await pageMe(ctx);
+    if (p === '/program/profile' && req.method === 'POST') return await postProfile(ctx);
     if ((p === '/program/login' || p === '/program/register' || p === '/program/logout') && req.method === 'POST') return await postAthlete(ctx, p.split('/').pop());
     if (p === '/privacy' || p === '/consent' || p === '/consent-public' || p === '/requisites') {
       const s = await getSettings();

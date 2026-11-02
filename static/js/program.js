@@ -88,3 +88,31 @@
     go.disabled = false;
   });
 })();
+
+// Мои тренировки: настройки профиля
+(function () {
+  const csrf = (document.querySelector('meta[name=csrf]') || {}).content || '';
+  const msg = document.getElementById('p-msg');
+  if (!msg) return;
+  const show = (t, ok) => { msg.textContent = t; msg.hidden = false; msg.style.color = ok ? 'var(--accent)' : ''; };
+  const post = async (data) => {
+    const r = await fetch('/program/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, csrf }) });
+    let j = {}; try { j = await r.json(); } catch (e) { /* пусто */ }
+    if (!r.ok || !j.ok) throw new Error(j.error || 'Не получилось, попробуйте ещё раз.');
+  };
+  const pub = document.getElementById('p-public');
+  pub.addEventListener('change', async () => {
+    try { await post({ public: pub.checked }); show(pub.checked ? 'Ваше имя будет в рейтинге.' : 'Имя скрыто из рейтинга.', true); } catch (e) { pub.checked = !pub.checked; show(e.message); }
+  });
+  document.getElementById('pinform').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    try { await post({ old_pin: f.old_pin.value, pin: f.pin.value }); f.reset(); show('PIN изменён.', true); } catch (e) { show(e.message); }
+  });
+  const del = document.getElementById('p-delete');
+  let armed = false;
+  del.addEventListener('click', async () => {
+    if (!armed) { armed = true; del.textContent = 'Нажмите ещё раз, чтобы удалить безвозвратно'; setTimeout(() => { armed = false; del.textContent = 'Удалить профиль и все отметки'; }, 5000); return; }
+    try { await post({ delete: true }); location.href = '/program'; } catch (e) { show(e.message); }
+  });
+})();
