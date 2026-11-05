@@ -464,7 +464,8 @@ async function postLead(ctx) {
   const interest = String(fields.interest || '').trim().slice(0, 120);
   if (!validRuPhone(phone)) return fail('Проверьте номер телефона: нужен российский номер, например +7 914 123-45-67.');
   if (!fields.consent) return fail('Нужно согласие на обработку персональных данных.');
-  if (rateLimited('lead:' + clientIp(ctx.req), 5, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
+  // хостинг не передаёт IP посетителя, поэтому ограничиваем по номеру и общий поток заявок
+  if (rateLimited('lead:' + phoneKey(phone), 3, 3600000) || rateLimited('lead:all', 30, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
   const ua = String(ctx.req.headers['user-agent'] || '').slice(0, 300);
   const sigs = leadSignals(fields, ua);
   const created = now();
@@ -575,7 +576,7 @@ async function readJson(ctx) {
 }
 
 async function postWodDone(ctx) {
-  if (rateLimited('done:' + clientIp(ctx.req), 300, 3600000)) return ctx.json({ ok: false, error: 'Слишком много отметок, попробуйте позже.' }, 429);
+  if (rateLimited('done:' + deviceId(ctx), 300, 3600000)) return ctx.json({ ok: false, error: 'Слишком много отметок, попробуйте позже.' }, 429);
   const body = await readJson(ctx);
   if (!body || body.csrf !== ctx.session.csrf) return ctx.json({ ok: false, error: 'Обновите страницу и попробуйте ещё раз.' }, 400);
   const id = Number(body.id);
@@ -615,8 +616,8 @@ async function postAthlete(ctx, action) {
   const pin = String(body.pin || '').trim();
   if (name.length < 2) return ctx.json({ ok: false, error: 'Укажите имя и фамилию — так вас узнают в рейтинге.' }, 400);
   if (!/^\d{4}$/.test(pin)) return ctx.json({ ok: false, error: 'PIN — ровно 4 цифры.' }, 400);
-  if (rateLimited('ath:' + clientIp(ctx.req), 20, 900000)) return ctx.json({ ok: false, error: 'Слишком много попыток. Подождите 15 минут.' }, 429);
   const key = nameKey(name);
+  if (rateLimited('ath:' + key, 8, 900000) || rateLimited('ath:all', 300, 900000)) return ctx.json({ ok: false, error: 'Слишком много попыток. Подождите 15 минут.' }, 429);
   const ex = await db.get('SELECT * FROM athletes WHERE name_key=$1', [key]);
   let aid;
   if (action === 'register') {
@@ -1001,14 +1002,18 @@ async function adminLogin(ctx) {
     else if (a === 'reset') { delete ctx.session.pendingEmail; ctx.sessionDirty = true; step = 'email'; }
     else if (a === 'send') {
       const email = String(fields.email || '').trim().toLowerCase();
-      if (rateLimited('mailcode:' + clientIp(ctx.req), 5, 900000)) error = 'Слишком много запросов. Подождите 15 минут.';
+      if (rateLimited('mailcode:' + email, 30, 3600000)) error = 'Слишком много запросов. Подождите немного.';
       else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) error = 'Проверьте адрес почты.';
       else if (!smtpReady()) error = 'Отправка писем на сервере ещё не настроена (нужны SMTP_USER и SMTP_PASSWORD в Pipecore).';
       else {
-        if (ADMIN_EMAILS.includes(email)) {
+        const prevRow = await db.get("SELECT value FROM settings WHERE key='_login_code'");
+        const prev = prevRow ? JSON.parse(prevRow.value || '{}') : {};
+        // код уже отправлен меньше 2 минут назад — не шлём новый (чужие запросы не сбивают ваш код и не заваливают почту письмами)
+        const fresh = prev.code && prev.sent && Date.now() - prev.sent < 120000 && Date.now() < prev.exp;
+        if (ADMIN_EMAILS.includes(email) && !fresh && !rateLimited('mailsend', 10, 3600000)) {
           const code = String(crypto.randomInt(100000, 1000000));
           const token = crypto.randomBytes(24).toString('hex');
-          await setSetting('_login_code', JSON.stringify({ code: sha(code), link: sha(token), exp: Date.now() + 15 * 60000, tries: 0 }));
+          await setSetting('_login_code', JSON.stringify({ code: sha(code), link: sha(token), exp: Date.now() + 15 * 60000, sent: Date.now(), tries: 0 }));
           const link = `${rootUrl(ctx.req)}admin/login?t=${token}`;
           const text = `Код для входа в админку CF BAZA: ${code}\n\nИли просто нажмите на ссылку:\n${link}\n\nКод и ссылка действуют 15 минут. Если вы не запрашивали вход — ничего не делайте, без кода войти нельзя.`;
           try {
@@ -1025,7 +1030,7 @@ async function adminLogin(ctx) {
       const st = row ? JSON.parse(row.value || '{}') : {};
       const code = String(fields.code || '').replace(/\D/g, '');
       if (!st.code || Date.now() > st.exp) { error = 'Код устарел. Запросите новый.'; }
-      else if (st.tries >= 5) { error = 'Слишком много неверных попыток. Запросите новый код.'; }
+      else if (st.tries >= 10) { error = 'Слишком много неверных попыток. Запросите новый код.'; }
       else if (sha(code) === st.code && ADMIN_EMAILS.includes(ctx.session.pendingEmail)) {
         await setSetting('_login_code', '{}');
         return await adminSignIn(ctx);
@@ -1037,7 +1042,7 @@ async function adminLogin(ctx) {
       step = 'code';
     } else if (a === 'password') {
       step = 'password';
-      if (rateLimited('login:' + clientIp(ctx.req), 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
+      if (rateLimited('login', 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
       else {
         const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
         if (row && H.checkPassword(String(fields.password || ''), row.value)) return await adminSignIn(ctx);
@@ -1204,7 +1209,6 @@ async function handleAdmin(ctx) {
     }
   }
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
-  if (p === '/admin/whoami') { const h = ctx.req.headers; return ctx.json({ xff: h['x-forwarded-for'] || null, xri: h['x-real-ip'] || null, fwd: h.forwarded || null, cf: h['cf-connecting-ip'] || null, tci: h['true-client-ip'] || null, sock: ctx.req.socket.remoteAddress, ip: clientIp(ctx.req) }); }
   if (p === '/admin/crm') return adminCrm(ctx, form);
   if (p === '/admin/crm.csv') return adminCrmCsv(ctx);
   if (p === '/admin/logout' && form) { ctx.session = {}; ctx.sessionDirty = true; return ctx.redirect('/admin/login'); }
