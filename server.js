@@ -1204,6 +1204,7 @@ async function handleAdmin(ctx) {
     }
   }
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
+  if (p === '/admin/whoami') { const h = ctx.req.headers; return ctx.json({ xff: h['x-forwarded-for'] || null, xri: h['x-real-ip'] || null, fwd: h.forwarded || null, cf: h['cf-connecting-ip'] || null, tci: h['true-client-ip'] || null, sock: ctx.req.socket.remoteAddress, ip: clientIp(ctx.req) }); }
   if (p === '/admin/crm') return adminCrm(ctx, form);
   if (p === '/admin/crm.csv') return adminCrmCsv(ctx);
   if (p === '/admin/logout' && form) { ctx.session = {}; ctx.sessionDirty = true; return ctx.redirect('/admin/login'); }
