@@ -22,6 +22,7 @@ const db = open();
 const STATIC_DIR = path.join(__dirname, 'static');
 const DAY_ORDER = Object.fromEntries(C.DAYS.map((d, i) => [d, i]));
 let codec;
+let FORM_SECRET = 'dev';
 
 const now = () => {
   const d = new Date(Date.now() + 8 * 3600 * 1000); // время Иркутска (UTC+8)
@@ -38,7 +39,9 @@ async function init() {
   for (const col of ["result TEXT NOT NULL DEFAULT ''", 'scaled INTEGER NOT NULL DEFAULT 0', 'updated TEXT']) {
     try { await db.exec(`ALTER TABLE wod_done ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}${col}`); } catch { /* колонка уже есть */ }
   }
-  try { await db.exec(`ALTER TABLE leads ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}client_id INTEGER`); } catch { /* колонка уже есть */ }
+  for (const col of ['client_id INTEGER', 'ua TEXT', 'meta TEXT']) {
+    try { await db.exec(`ALTER TABLE leads ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}${col}`); } catch { /* колонка уже есть */ }
+  }
   for (const [k, v] of Object.entries(C.SETTINGS_DEFAULTS)) {
     await db.run('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING', [k, v]);
   }
@@ -203,6 +206,7 @@ async function init() {
     secret = (await db.get("SELECT value FROM settings WHERE key='_secret'")).value;
   }
   codec = H.sessionCodec(secret);
+  FORM_SECRET = secret;
 }
 
 async function getSettings() {
@@ -408,10 +412,42 @@ async function pageIndex(ctx) {
     photos: await getItems('photo'), schedule: buildSchedule(slots), usedTypes: new Set(slots.map((x) => x.type)),
     coaches: await getItems('coach'), evpillars: await getItems('evpillar'), evphotos: await getItems('evphoto'), plans: await getItems('plan'), extras: await getItems('extra'),
     reviews: await getItems('review'), faqs: await getItems('faq'),
-    sent: ctx.url.searchParams.get('sent') === '1', flash: ctx.takeFlash(),
+    sent: ctx.url.searchParams.get('sent') === '1', flash: ctx.takeFlash(), formToken: formToken(),
   };
   ctx.html(V.site(data));
 }
+
+// ---------------------------------------------------------------------------
+// Защита формы заявки от ботов (без капчи):
+//  1) подписанная метка времени в форме — бот, который шлёт запросы мимо страницы, её не имеет;
+//  2) слишком быстрое заполнение (меньше 3 секунд) — человек так не успевает;
+//  3) скрипт на странице отмечает, что форму заполняли руками (нажатия/касания), и что работает JavaScript;
+//  4) скрытое поле-ловушка, подозрительный браузер, ссылки в имени.
+// Подозрительные заявки не теряются: они сохраняются со статусом «спам», без уведомлений — их видно в админке.
+// ---------------------------------------------------------------------------
+const formSig = (ts) => crypto.createHmac('sha256', FORM_SECRET).update('lead:' + ts).digest('hex').slice(0, 20);
+function formToken() { const ts = Date.now().toString(36); return `${ts}.${formSig(ts)}`; }
+const BOT_UA = /bot|crawl|spider|curl|wget|python|httpclient|okhttp|java\/|go-http|axios|node-fetch|headless|phantom|selenium|puppeteer|playwright|scrapy|libwww/i;
+
+function leadSignals(fields, ua) {
+  const hard = []; const soft = [];
+  const [ts, sig] = String(fields.ft || '').split('.');
+  let age = null;
+  if (!ts || !sig || formSig(ts) !== sig) hard.push('отправлено мимо страницы сайта (нет метки формы)');
+  else {
+    age = (Date.now() - parseInt(ts, 36)) / 1000;
+    if (age < 3) hard.push(`форма заполнена за ${age.toFixed(1)} с`);
+  }
+  if (!ua) hard.push('браузер не указан');
+  else if (BOT_UA.test(ua)) hard.push('программа, а не браузер');
+  if (/https?:|www\.|\.(ru|com|net|org|xyz|top|online)\b|@|<|\[url/i.test(String(fields.name || ''))) hard.push('ссылка или адрес в имени');
+  if (fields.js !== (String(fields.ft || '').split('.')[1] || '').slice(0, 6).split('').reverse().join('')) soft.push('без JavaScript');
+  if (!(Number(fields.hx) > 0)) soft.push('без нажатий на клавиатуру или экран');
+  const spam = hard.length > 0 || soft.length >= 2;
+  return { spam, reasons: [...hard, ...soft], age: age === null ? null : Math.round(age), hx: Number(fields.hx) || 0 };
+}
+
+const validRuPhone = (p) => { const d = String(p || '').replace(/\D/g, ''); return (d.length === 11 && /^[78]9/.test(d)) || (d.length === 10 && /^9/.test(d)) || (d.length === 11 && /^[78][3-8]/.test(d)); };
 
 async function postLead(ctx) {
   const wantsJson = /application\/json/.test(ctx.req.headers.accept || '');
@@ -421,21 +457,34 @@ async function postLead(ctx) {
     ctx.flash('error', msg);
     return ctx.redirect('/#contacts');
   };
-  if (fields.website) return wantsJson ? ctx.json({ ok: true }) : ctx.redirect('/?sent=1#contacts');
+  const okResp = () => (wantsJson ? ctx.json({ ok: true }) : ctx.redirect('/?sent=1#contacts'));
+  if (fields.website) return okResp(); // ловушка: поле видят только боты
   const name = String(fields.name || '').trim().slice(0, 80);
   const phone = String(fields.phone || '').trim().slice(0, 40);
   const interest = String(fields.interest || '').trim().slice(0, 120);
-  if (phone.replace(/\D/g, '').length < 10) return fail('Проверьте номер телефона — нужно не меньше 10 цифр.');
+  if (!validRuPhone(phone)) return fail('Проверьте номер телефона: нужен российский номер, например +7 914 123-45-67.');
   if (!fields.consent) return fail('Нужно согласие на обработку персональных данных.');
   if (rateLimited('lead:' + clientIp(ctx.req), 5, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
+  const ua = String(ctx.req.headers['user-agent'] || '').slice(0, 300);
+  const sigs = leadSignals(fields, ua);
   const created = now();
-  const ins = await db.run('INSERT INTO leads(created, name, phone, interest, ip) VALUES ($1, $2, $3, $4, $5) RETURNING id', [created, name, phone, interest, clientIp(ctx.req)]);
+  // тот же номер за последние 30 минут — повтор, второй раз не уведомляем
+  const key = phoneKey(phone);
+  const recent = await db.all("SELECT phone FROM leads WHERE created >= $1 AND status <> 'spam'", [new Date(Date.now() + 8 * 3600 * 1000 - 30 * 60000).toISOString().slice(0, 16).replace('T', ' ')]);
+  const dup = recent.some((r) => phoneKey(r.phone) === key);
+  const status = sigs.spam ? 'spam' : 'new';
+  const ins = await db.run('INSERT INTO leads(created, name, phone, interest, ip, status, ua, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+    [created, name, phone, interest, clientIp(ctx.req), status, ua, JSON.stringify({ reasons: sigs.reasons, age: sigs.age, hx: sigs.hx, dup })]);
+  if (sigs.spam) { console.log('Заявка помечена как спам:', sigs.reasons.join('; ')); return okResp(); }
   try { await crmFromLead({ id: ins.rows[0] && ins.rows[0].id, created, name, phone, interest, status: 'new' }); } catch (err) { console.error('crm:', err.message); }
-  const s = await getSettings();
-  const body = `Новая заявка с сайта CF BAZA\n\nИмя: ${name || '—'}\nТелефон: ${phone}\nИнтерес: ${interest || '—'}\nВремя: ${created}\n\nВсе заявки: ${rootUrl(ctx.req)}admin/leads`;
-  notifyTelegram(body);
-  notifyEmail(`Заявка с сайта: ${name || phone}`, body, s.notify_email);
-  return wantsJson ? ctx.json({ ok: true }) : ctx.redirect('/?sent=1#contacts');
+  if (!dup) {
+    const s = await getSettings();
+    const warn = sigs.reasons.length ? `\nПроверьте: ${sigs.reasons.join(', ')}` : '';
+    const body = `Новая заявка с сайта CF BAZA\n\nИмя: ${name || '—'}\nТелефон: ${phone}\nИнтерес: ${interest || '—'}\nВремя: ${created}${warn}\n\nВсе заявки: ${rootUrl(ctx.req)}admin/leads`;
+    notifyTelegram(body);
+    notifyEmail(`Заявка с сайта: ${name || phone}`, body, s.notify_email);
+  }
+  return okResp();
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,11 +1056,19 @@ async function adminLeads(ctx, form) {
     if (a === 'done') await db.run("UPDATE leads SET status='done' WHERE id=$1", [id]);
     else if (a === 'new') await db.run("UPDATE leads SET status='new' WHERE id=$1", [id]);
     else if (a === 'delete') await db.run('DELETE FROM leads WHERE id=$1', [id]);
-    return ctx.redirect('/admin/leads' + (ctx.url.searchParams.get('show') === 'new' ? '?show=new' : ''));
+    else if (a === 'spam') await db.run("UPDATE leads SET status='spam' WHERE id=$1", [id]);
+    else if (a === 'notspam') {
+      const l = await db.get('SELECT * FROM leads WHERE id=$1', [id]);
+      if (l) { await db.run("UPDATE leads SET status='new' WHERE id=$1", [id]); if (!l.client_id) await crmFromLead({ ...l, status: 'new' }); }
+    } else if (a === 'purge_spam') await db.run("DELETE FROM leads WHERE status='spam'");
+    const sh = ctx.url.searchParams.get('show');
+    return ctx.redirect('/admin/leads' + (sh ? '?show=' + encodeURIComponent(sh) : ''));
   }
   const show = ctx.url.searchParams.get('show') || '';
-  const rows = await db.all(`SELECT * FROM leads${show === 'new' ? " WHERE status='new'" : ''} ORDER BY id DESC LIMIT 500`);
-  return adminRender(ctx, 'Заявки', V.leads({ rows, show, csrf: ctx.session.csrf }));
+  const where = show === 'new' ? " WHERE status='new'" : show === 'spam' ? " WHERE status='spam'" : " WHERE status <> 'spam'";
+  const rows = await db.all(`SELECT * FROM leads${where} ORDER BY id DESC LIMIT 500`);
+  const spamCount = Number((await db.get("SELECT COUNT(*) AS n FROM leads WHERE status='spam'")).n);
+  return adminRender(ctx, 'Заявки', V.leads({ rows, show, spamCount, csrf: ctx.session.csrf }));
 }
 
 async function adminLeadsCsv(ctx) {

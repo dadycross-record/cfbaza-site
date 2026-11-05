@@ -9,6 +9,16 @@
     p.textContent = text;
     box.appendChild(p);
   }
+  // Признаки живого человека для защиты от ботов: работает JavaScript и форму заполняют руками
+  if (form) {
+    var hx = form.querySelector('[name=hx]'), js = form.querySelector('[name=js]'), ft = form.querySelector('[name=ft]');
+    var n = 0;
+    var mark = function () { n += 1; if (hx) hx.value = String(n); };
+    ['keydown', 'pointerdown', 'touchstart', 'input', 'change'].forEach(function (ev) { form.addEventListener(ev, mark, { passive: true }); });
+    var proof = function () { if (js && ft) js.value = (ft.value.split('.')[1] || '').slice(0, 6).split('').reverse().join(''); };
+    proof();
+    form.addEventListener('submit', proof, true);
+  }
   if (form && window.fetch && window.FormData) {
     form.addEventListener('submit', function (e) {
       e.preventDefault();
