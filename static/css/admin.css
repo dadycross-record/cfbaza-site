@@ -149,3 +149,5 @@ form.edit.flat { padding: 0; max-width: none; }
 .login .login-box form { padding: 0; max-width: none; background: none; border-radius: 0; }
 .login-alt { margin: 0; text-align: center; font-size: 14px; }
 .login-alt a, .login-alt button { color: var(--muted); background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; }
+/* The native hidden attribute must win over layout classes such as .edit. */
+[hidden] { display: none !important; }

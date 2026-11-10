@@ -17,6 +17,9 @@ const { processImage } = require('./lib/images');
 const { sendMail } = require('./lib/mail');
 const L = require('./lib/legal');
 const W = require('./lib/wod');
+const { consumeLogin, csvCell, durableLimit } = require('./lib/security');
+const backup = require('./lib/backup');
+const csp = require('./lib/csp');
 
 const db = open();
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -343,11 +346,12 @@ class Ctx {
   flash(cat, msg) { (this.session.flash = this.session.flash || []).push([cat, msg]); this.sessionDirty = true; }
   takeFlash() { const f = this.session.flash || []; if (f.length) { delete this.session.flash; this.sessionDirty = true; } return f; }
   headers(extra = {}) {
-    const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()', ...extra };
+    const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Cache-Control': 'no-store', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()', ...extra };
     const https = isHttps(this.req);
     if (https) h['Strict-Transport-Security'] = 'max-age=31536000';
     const isAdmin = this.path.startsWith('/admin');
-    if (/text\/html/.test(h['Content-Type'] || '')) h['Content-Security-Policy'] = (isAdmin ? CSP_ADMIN : CSP_SITE) + (https ? '; upgrade-insecure-requests' : '');
+    if (/text\/html/.test(h['Content-Type'] || '')) h['Content-Security-Policy'] = (isAdmin ? CSP_ADMIN : CSP_SITE).replace("'unsafe-inline'", `'nonce-${csp.nonce()}'`) + (https ? '; upgrade-insecure-requests' : '');
+    if (h['Content-Security-Policy'] && !/^\/admin\/program\/\d+$/.test(this.path)) h['Content-Security-Policy'] = h['Content-Security-Policy'].replace("'unsafe-eval' ", '');
     if (isAdmin) { h['X-Frame-Options'] = 'DENY'; h['Cache-Control'] = 'no-store'; }
     const cookies = [...(this.extraCookies || [])];
     if (this.sessionDirty) {
@@ -465,7 +469,7 @@ async function postLead(ctx) {
   if (!validRuPhone(phone)) return fail('Проверьте номер телефона: нужен российский номер, например +7 914 123-45-67.');
   if (!fields.consent) return fail('Нужно согласие на обработку персональных данных.');
   // хостинг не передаёт IP посетителя, поэтому ограничиваем по номеру и общий поток заявок
-  if (rateLimited('lead:' + phoneKey(phone), 3, 3600000) || rateLimited('lead:all', 30, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
+  if (rateLimited('lead:' + phoneKey(phone), 3, 3600000) || await durableLimit(db, 'lead_all', 30, 600000)) return fail('Слишком много заявок подряд. Позвоните нам, пожалуйста.');
   const ua = String(ctx.req.headers['user-agent'] || '').slice(0, 300);
   const sigs = leadSignals(fields, ua);
   const created = now();
@@ -935,7 +939,7 @@ async function adminCrmCard(ctx, id, form) {
 }
 
 async function adminCrmCsv(ctx) {
-  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const q = csvCell;
   const rows = await db.all('SELECT * FROM clients ORDER BY id DESC');
   const out = ['Имя;Телефон;Этап;Источник;Следующий контакт;Заметка;Создан;Обновлён',
     ...rows.map((r) => [r.name, r.phone, CRM_STATUS[r.status] || r.status, CRM_SOURCE[r.source] || r.source, r.next_date, r.note, r.created, r.updated].map(q).join(';'))].join('\r\n');
@@ -987,10 +991,7 @@ async function adminLogin(ctx) {
   let step = ctx.session.pendingEmail ? 'code' : 'email';
   if (ctx.req.method === 'GET' && ctx.url.searchParams.get('t')) {
     // вход по ссылке из письма
-    const row = await db.get("SELECT value FROM settings WHERE key='_login_code'");
-    const st = row ? JSON.parse(row.value || '{}') : {};
-    if (st.link && st.link === sha(ctx.url.searchParams.get('t')) && Date.now() < st.exp) {
-      await setSetting('_login_code', '{}');
+    if (await consumeLogin(db, { token: ctx.url.searchParams.get('t') }) === 'ok') {
       return await adminSignIn(ctx);
     }
     error = 'Ссылка устарела или уже использована. Запросите новый код.';
@@ -1010,11 +1011,11 @@ async function adminLogin(ctx) {
         const prev = prevRow ? JSON.parse(prevRow.value || '{}') : {};
         // код уже отправлен меньше 2 минут назад — не шлём новый (чужие запросы не сбивают ваш код и не заваливают почту письмами)
         const fresh = prev.code && prev.sent && Date.now() - prev.sent < 120000 && Date.now() < prev.exp;
-        if (ADMIN_EMAILS.includes(email) && !fresh && !rateLimited('mailsend', 10, 3600000)) {
+        if (ADMIN_EMAILS.includes(email) && !fresh && !(await durableLimit(db, 'mailsend', 10, 3600000))) {
           const code = String(crypto.randomInt(100000, 1000000));
           const token = crypto.randomBytes(24).toString('hex');
           await setSetting('_login_code', JSON.stringify({ code: sha(code), link: sha(token), exp: Date.now() + 15 * 60000, sent: Date.now(), tries: 0 }));
-          const link = `${rootUrl(ctx.req)}admin/login?t=${token}`;
+          const link = `${SITE_URL}admin/login?t=${token}`;
           const text = `Код для входа в админку CF BAZA: ${code}\n\nИли просто нажмите на ссылку:\n${link}\n\nКод и ссылка действуют 15 минут. Если вы не запрашивали вход — ничего не делайте, без кода войти нельзя.`;
           try {
             await sendMail({ host: process.env.SMTP_HOST || 'smtp.yandex.ru', port: process.env.SMTP_PORT || 465, user: String(process.env.SMTP_USER).trim(), pass: String(process.env.SMTP_PASSWORD).replace(/\s+/g, ''), to: [email], subject: `Код входа CF BAZA: ${code}`, text });
@@ -1026,23 +1027,19 @@ async function adminLogin(ctx) {
         if (!error) { ctx.session.pendingEmail = email; ctx.sessionDirty = true; step = 'code'; info = `Если ${email} — адрес администратора, на него пришло письмо с кодом. Проверьте и папку «Спам».`; }
       }
     } else if (a === 'code') {
-      const row = await db.get("SELECT value FROM settings WHERE key='_login_code'");
-      const st = row ? JSON.parse(row.value || '{}') : {};
       const code = String(fields.code || '').replace(/\D/g, '');
-      if (!st.code || Date.now() > st.exp) { error = 'Код устарел. Запросите новый.'; }
-      else if (st.tries >= 10) { error = 'Слишком много неверных попыток. Запросите новый код.'; }
-      else if (sha(code) === st.code && ADMIN_EMAILS.includes(ctx.session.pendingEmail)) {
-        await setSetting('_login_code', '{}');
+      const result = await consumeLogin(db, { code, allowed: ADMIN_EMAILS.includes(ctx.session.pendingEmail) });
+      if (result === 'expired') { error = 'Код устарел. Запросите новый.'; }
+      else if (result === 'limited') { error = 'Слишком много неверных попыток. Запросите новый код.'; }
+      else if (result === 'ok') {
         return await adminSignIn(ctx);
       } else {
-        st.tries = (st.tries || 0) + 1;
-        await setSetting('_login_code', JSON.stringify(st));
         error = 'Неверный код.';
       }
       step = 'code';
     } else if (a === 'password') {
       step = 'password';
-      if (rateLimited('login', 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
+      if (await durableLimit(db, 'login', 8, 900000)) error = 'Слишком много попыток. Подождите 15 минут.';
       else {
         const row = await db.get("SELECT value FROM settings WHERE key='_admin_hash'");
         if (row && H.checkPassword(String(fields.password || ''), row.value)) return await adminSignIn(ctx);
@@ -1077,7 +1074,7 @@ async function adminLeads(ctx, form) {
 }
 
 async function adminLeadsCsv(ctx) {
-  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const q = csvCell;
   const rows = await db.all('SELECT * FROM leads ORDER BY id DESC');
   const out = ['Дата;Имя;Телефон;Интерес;Статус', ...rows.map((r) => [r.created, r.name, r.phone, r.interest, r.status === 'done' ? 'обработана' : 'новая'].map(q).join(';'))].join('\r\n');
   ctx.text('\ufeff' + out, 200, 'text/csv; charset=utf-8', { 'Content-Disposition': 'attachment; filename=cfbaza-leads.csv' });
@@ -1209,6 +1206,16 @@ async function handleAdmin(ctx) {
     }
   }
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
+  if (p === '/admin/backups') {
+    return adminRender(ctx, 'Резервная копия', `<div class="topline"><h1>Резервная копия</h1></div><p>Скачайте копию базы CF BAZA на компьютер. Она включает настройки, фотографии, заявки, CRM и тренировки.</p><p>Скачивание выполняется вручную. На выключенный компьютер сайт не может сохранять копии автоматически.</p><form method="post" action="/admin/backups/download"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn btn-primary" type="submit">Скачать копию CF BAZA</button></form><p>Файл содержит персональные данные. Храните его в защищённой папке. Для восстановления требуется отдельная проверка; эта кнопка ничего не восстанавливает.</p>`);
+  }
+  if (p === '/admin/backups/download' && form) {
+    if (rateLimited('backup-download', 6, 3600000)) return ctx.text('Слишком много скачиваний. Попробуйте позже.', 429);
+    const data = await backup.snapshot(db);
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+    ctx.res.writeHead(200, ctx.headers({ 'Content-Type': 'application/gzip', 'Content-Disposition': `attachment; filename="cfbaza-backup-${stamp}.json.gz"`, 'Cache-Control': 'no-store' }));
+    return ctx.res.end(data);
+  }
   if (p === '/admin/crm') return adminCrm(ctx, form);
   if (p === '/admin/crm.csv') return adminCrmCsv(ctx);
   if (p === '/admin/logout' && form) { ctx.session = {}; ctx.sessionDirty = true; return ctx.redirect('/admin/login'); }
@@ -1227,8 +1234,11 @@ async function handleAdmin(ctx) {
   return notFound(ctx);
 }
 
-async function handle(req, res) {
-  const ctx = new Ctx(req, res);
+function handle(req, res) { return csp.run(() => handleRequest(req, res)); }
+async function handleRequest(req, res) {
+  let ctx;
+  try { ctx = new Ctx(req, res); }
+  catch { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Неверный запрос'); }
   const p = ctx.path;
   let m0;
   const host = reqHost(req);

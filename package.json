@@ -6,18 +6,19 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "echo \"Сборка не нужна\""
+    "build": "echo \"Сборка не нужна\"",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "pg": "^8.13.0",
-    "sharp": "^0.33.5",
-    "@fontsource/oswald": "^5.1.0",
-    "@fontsource/open-sans": "^5.1.0",
-    "@fontsource/jetbrains-mono": "^5.1.0",
     "@fontsource/caveat": "^5.1.0",
-    "jszip": "^3.10.1"
+    "@fontsource/jetbrains-mono": "^5.1.0",
+    "@fontsource/open-sans": "^5.1.0",
+    "@fontsource/oswald": "^5.1.0",
+    "jszip": "^3.10.1",
+    "pg": "^8.13.0",
+    "sharp": "^0.35.5"
   }
 }
