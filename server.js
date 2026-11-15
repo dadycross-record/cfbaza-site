@@ -1252,6 +1252,20 @@ async function handleRequest(req, res) {
     }
     // Временный адрес и прочие хосты работают, но не индексируются — чтобы в поиске был только cf-baza.ru
     if (!isMainHost) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    // Windows backup agent: inaccessible until a strong BACKUP_PULL_TOKEN is set.
+    if (p === '/api/private/backup' && req.method === 'GET') {
+      const expected=String(process.env.BACKUP_PULL_TOKEN||'');
+      const sent=/^Bearer (\\S+)$/.exec(String(req.headers.authorization||''))?.[1]||'';
+      if(expected.length<40 || sent.length!==expected.length || !crypto.timingSafeEqual(Buffer.from(sent),Buffer.from(expected))) {
+        return ctx.text('Не найдено',404);
+      }
+      if(rateLimited('private-db-backup',12,3600000))return ctx.text('Слишком много запросов',429);
+      const data=await backup.snapshot(db);
+      if(!data || data.length<50)return ctx.text('Копия пуста',503);
+      const stamp=new Date().toISOString().slice(0,10);
+      res.writeHead(200,ctx.headers({'Content-Type':'application/gzip','Content-Disposition':'attachment; filename="baza-db-'+stamp+'.json.gz"','Content-Length':data.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}));
+      return res.end(data);
+    }
     if (p.startsWith('/static/')) return await serveStatic(ctx);
     if (p.startsWith('/uploads/')) return await serveUpload(ctx);
     if (p === '/' && (req.method === 'GET' || req.method === 'HEAD')) return await pageIndex(ctx);
