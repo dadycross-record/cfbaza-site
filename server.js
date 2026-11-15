@@ -20,9 +20,11 @@ const L = require('./lib/legal');
 const W = require('./lib/wod');
 const { consumeLogin, csvCell, durableLimit } = require('./lib/security');
 const backup = require('./lib/backup');
+const { createFinance } = require('./lib/finance');
 const csp = require('./lib/csp');
 
 const db = open();
+const finance = createFinance(db, H, V);
 const STATIC_DIR = path.join(__dirname, 'static');
 const DAY_ORDER = Object.fromEntries(C.DAYS.map((d, i) => [d, i]));
 let codec;
@@ -39,6 +41,7 @@ const timeNum = (t) => Number(String(t || '').replace(/\D/g, '')) || 0;
 // ---------------------------------------------------------------------------
 async function init() {
   await db.exec(db.schema);
+  await finance.init();
   // новые колонки (для уже созданных таблиц)
   for (const col of ["result TEXT NOT NULL DEFAULT ''", 'scaled INTEGER NOT NULL DEFAULT 0', 'updated TEXT']) {
     try { await db.exec(`ALTER TABLE wod_done ADD COLUMN ${db.kind === 'pg' ? 'IF NOT EXISTS ' : ''}${col}`); } catch { /* колонка уже есть */ }
@@ -350,7 +353,7 @@ class Ctx {
     const h = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Cache-Control': 'no-store', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()', ...extra };
     const https = isHttps(this.req);
     if (https) h['Strict-Transport-Security'] = 'max-age=31536000';
-    const isAdmin = this.path.startsWith('/admin');
+    const isAdmin = this.path.startsWith('/admin') || this.path.startsWith('/staff');
     if (/text\/html/.test(h['Content-Type'] || '')) h['Content-Security-Policy'] = (isAdmin ? CSP_ADMIN : CSP_SITE).replace("'unsafe-inline'", `'nonce-${csp.nonce()}'`) + (https ? '; upgrade-insecure-requests' : '');
     if (h['Content-Security-Policy'] && !/^\/admin\/program\/\d+$/.test(this.path)) h['Content-Security-Policy'] = h['Content-Security-Policy'].replace("'unsafe-eval' ", '');
     if (isAdmin) { h['X-Frame-Options'] = 'DENY'; h['Cache-Control'] = 'no-store'; }
@@ -856,7 +859,7 @@ async function adminDash(ctx) {
     marks: await cnt('SELECT COUNT(*) AS n FROM wod_done WHERE created >= $1', [dayStr(-6)]),
   };
   const s = await getSettings();
-  return adminRender(ctx, 'Обзор', V.adminDash({ leads, days, funnel, interests, clients, due, prog, metrika: String(s.metrika_id || '').trim(), status: CRM_STATUS }));
+  return adminRender(ctx, 'Обзор', V.adminDash({ leads, days, funnel, interests, clients, due, prog, metrika: String(s.metrika_id || '').trim(), status: CRM_STATUS }) + await finance.dashboardMini(dayStr(0).slice(0,7)));
 }
 
 async function adminCrm(ctx, form) {
@@ -1207,6 +1210,7 @@ async function handleAdmin(ctx) {
     }
   }
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
+  if (p === '/admin/finance' || p.startsWith('/admin/finance/')) return finance.manage(ctx, form, (title, body) => adminRender(ctx, title, body));
   if (p === '/admin/backups') {
     return adminRender(ctx, 'Резервная копия', `<div class="topline"><h1>Резервная копия</h1></div><p>Скачайте копию базы CF BAZA на компьютер. Она включает настройки, фотографии, заявки, CRM и тренировки.</p><p>Скачивание выполняется вручную. На выключенный компьютер сайт не может сохранять копии автоматически.</p><form method="post" action="/admin/backups/download"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn btn-primary" type="submit">Скачать копию CF BAZA</button></form><p>Файл содержит персональные данные. Храните его в защищённой папке. Для восстановления требуется отдельная проверка; эта кнопка ничего не восстанавливает.</p>`);
   }
@@ -1369,7 +1373,7 @@ async function handleRequest(req, res) {
     if (p === '/healthz') return ctx.text('ok');
     if (p === '/robots.txt') {
       if (!isMainHost) return ctx.text('User-agent: *\nDisallow: /\n');
-      return ctx.text(`User-agent: *\nDisallow: /admin\nDisallow: /lead\nDisallow: /cabinet\nSitemap: ${SITE_URL}sitemap.xml\n`);
+      return ctx.text(`User-agent: *\nDisallow: /admin\nDisallow: /staff\nDisallow: /lead\nDisallow: /cabinet\nSitemap: ${SITE_URL}sitemap.xml\n`);
     }
     if (p === '/sitemap.xml') {
       const r = SITE_URL;
@@ -1378,6 +1382,7 @@ async function handleRequest(req, res) {
       return ctx.text(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(([u, pr, f]) => `<url><loc>${r}${u}</loc><changefreq>${f}</changefreq><priority>${pr}</priority></url>`).join('')}</urlset>`, 200, 'application/xml');
     }
     if (p === '/favicon.ico') return ctx.redirect('/static/img/favicon-32.png');
+    if (p === '/staff' || p.startsWith('/staff/')) return await finance.handleStaff(ctx);
     if (p === '/admin' || p.startsWith('/admin/')) return await handleAdmin(ctx);
     return notFound(ctx);
   } catch (err) {
