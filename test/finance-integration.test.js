@@ -93,7 +93,8 @@ test('finance and employee workflow with a real SQLite database',async()=>{
 
     const saved=zlib.gunzipSync(await backup.snapshot(db));
     const dump=JSON.parse(saved.toString('utf8'));
-    assert.equal(dump.version,2);
+    assert.equal(dump.version,1);
+    assert.equal(dump.finance_schema,1);
     assert.ok(Array.isArray(dump.tables.cash_shifts));
     assert.ok(Array.isArray(dump.tables.staff_work));
     assert.ok(Array.isArray(dump.tables.finance_transactions));
