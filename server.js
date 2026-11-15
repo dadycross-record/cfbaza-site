@@ -1255,7 +1255,7 @@ async function handleRequest(req, res) {
     // Windows backup agent: inaccessible until a strong BACKUP_PULL_TOKEN is set.
     if (p === '/api/private/backup' && req.method === 'GET') {
       const expected=String(process.env.BACKUP_PULL_TOKEN||'');
-      const sent=/^Bearer (\\S+)$/.exec(String(req.headers.authorization||''))?.[1]||'';
+      const sent=/^Bearer (\S+)$/.exec(String(req.headers.authorization||''))?.[1]||'';
       if(expected.length<40 || sent.length!==expected.length || !crypto.timingSafeEqual(Buffer.from(sent),Buffer.from(expected))) {
         return ctx.text('Не найдено',404);
       }
