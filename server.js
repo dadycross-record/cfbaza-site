@@ -1290,7 +1290,7 @@ async function handleRequest(req, res) {
       const raw = await readPrivateBackupBody(req);
       if (raw.length < 50 || raw[0] !== 31 || raw[1] !== 139) return ctx.text('Файл не является gzip-копией', 400);
       let dump;
-      try { dump = JSON.parse(zlib.gunzipSync(raw).toString('utf8')); }
+      try { dump = JSON.parse(zlib.gunzipSync(raw, { maxOutputLength: 256 * 1024 * 1024 }).toString('utf8')); }
       catch { return ctx.text('Не удалось прочитать JSON внутри архива', 400); }
       try { backup.validate(dump); }
       catch (err) { return ctx.text(err.message || 'Архив не прошёл проверку', 400); }
