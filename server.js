@@ -1272,7 +1272,7 @@ async function handleRequest(req, res) {
     // Windows recovery utility: protected by the same high-entropy token as private backups.
     if ((p === '/api/private/restore/test' || p === '/api/private/restore/apply') && req.method === 'POST') {
       const expected = String(process.env.BACKUP_PULL_TOKEN || '');
-      const sent = /^Bearer (\\S+)$/.exec(String(req.headers.authorization || ''))?.[1] || '';
+      const sent = /^Bearer (\S+)$/.exec(String(req.headers.authorization || ''))?.[1] || '';
       if (expected.length < 40 || sent.length !== expected.length ||
           !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(expected))) {
         return ctx.text('Не найдено', 404);
@@ -1283,7 +1283,7 @@ async function handleRequest(req, res) {
           req.headers['x-backup-pre-restore-saved'] !== 'yes')) {
         return ctx.text('Для восстановления требуется подтверждение и локальная копия текущей базы', 400);
       }
-      if (!/^application\\/gzip(?:;|$)/i.test(req.headers['content-type'] || '')) return ctx.text('Ожидается gzip-архив JSON', 415);
+      if (!/^application\/gzip(?:;|$)/i.test(req.headers['content-type'] || '')) return ctx.text('Ожидается gzip-архив JSON', 415);
       if (rateLimited(applying ? 'private-db-restore-apply' : 'private-db-restore-test', applying ? 2 : 6, 3600000)) {
         return ctx.text('Слишком много попыток восстановления. Попробуйте позже.', 429);
       }
