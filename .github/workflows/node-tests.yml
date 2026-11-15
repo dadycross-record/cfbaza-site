@@ -1,0 +1,22 @@
+name: Node.js tests
+
+on:
+  push:
+    branches: [main, feature/club-finance-payroll-revenue]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: node --check server.js
+      - run: node --check lib/finance.js
+      - run: npm test
