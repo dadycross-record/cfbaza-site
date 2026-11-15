@@ -1269,16 +1269,15 @@ async function handleRequest(req, res) {
     }
     // Временный адрес и прочие хосты работают, но не индексируются — чтобы в поиске был только cf-baza.ru
     if (!isMainHost) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
-    // Windows recovery utility: protected by the same high-entropy token as private backups.
+    // Desktop recovery: read-only verification by default; destructive restore is explicitly gated.
     if ((p === '/api/private/restore/test' || p === '/api/private/restore/apply') && req.method === 'POST') {
-      const expected = String(process.env.BACKUP_PULL_TOKEN || '');
-      const sent = /^Bearer (\S+)$/.exec(String(req.headers.authorization || ''))?.[1] || '';
-      if (expected.length < 40 || sent.length !== expected.length ||
-          !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(expected))) {
-        return ctx.text('Не найдено', 404);
-      }
-      if (db.kind !== 'pg' || typeof db.withClient !== 'function') return ctx.text('Восстановление доступно только для PostgreSQL', 503);
       const applying = p.endsWith('/apply');
+      if (applying && process.env.BACKUP_RESTORE_ENABLED !== '1') return ctx.text('Не найдено', 404);
+      const expected = String(process.env[applying ? 'BACKUP_RESTORE_TOKEN' : 'BACKUP_PULL_TOKEN'] || '');
+      const sent = /^Bearer (\S+)$/.exec(String(req.headers.authorization || ''))?.[1] || '';
+      if (expected.length < (applying ? 48 : 40) || sent.length !== expected.length ||
+          !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(expected))) return ctx.text('Не найдено', 404);
+      if (db.kind !== 'pg' || typeof db.withClient !== 'function') return ctx.text('Восстановление доступно только для PostgreSQL', 503);
       if (applying && (req.headers['x-backup-restore-confirm'] !== 'RESTORE BAZA DATABASE' ||
           req.headers['x-backup-pre-restore-saved'] !== 'yes')) {
         return ctx.text('Для восстановления требуется подтверждение и локальная копия текущей базы', 400);
@@ -1296,22 +1295,31 @@ async function handleRequest(req, res) {
       catch (err) { return ctx.text(err.message || 'Архив не прошёл проверку', 400); }
       const rowCounts = Object.fromEntries(Object.entries(dump.tables).map(([name, rows]) => [name, rows.length]));
       if (!applying) {
-        await db.withClient(async client => {
-          await client.query('BEGIN');
-          try {
-            await backup.restore(client, dump, { manageTransaction: false });
-            await client.query('ROLLBACK');
-          } catch (err) {
-            try { await client.query('ROLLBACK'); } catch { }
-            throw err;
+        // Do not TRUNCATE/INSERT even in a rollback-only transaction on the live database.
+        // PostgreSQL setval() cannot be rolled back, and TRUNCATE takes exclusive locks.
+        const schema = await db.all(
+          "select table_name, column_name from information_schema.columns where table_schema='public'"
+        );
+        const byTable = new Map();
+        for (const c of schema) {
+          if (!byTable.has(c.table_name)) byTable.set(c.table_name, new Set());
+          byTable.get(c.table_name).add(c.column_name);
+        }
+        for (const [name, rows] of Object.entries(dump.tables)) {
+          const columns = byTable.get(name);
+          if (!columns) return ctx.text('Отсутствует таблица на сервере: ' + name, 400);
+          for (const row of rows) for (const col of Object.keys(row)) {
+            if (!columns.has(col)) return ctx.text('Нет столбца ' + name + '.' + col, 400);
           }
-        });
+        }
         res.writeHead(200, ctx.headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }));
-        return res.end(JSON.stringify({ ok: true, app: 'cfbaza-site', mode: 'test', created: dump.created || null, rowCounts }));
+        return res.end(JSON.stringify({ ok: true, app: 'cfbaza-site', mode: 'test', verification: 'read-only-schema',
+          created: dump.created || null, rowCounts }));
       }
       await db.withClient(client => backup.restore(client, dump));
       res.writeHead(200, ctx.headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }));
-      return res.end(JSON.stringify({ ok: true, app: 'cfbaza-site', mode: 'restore', created: dump.created || null, rowCounts, note: 'Секреты входа и администратора созданы заново.' }));
+      return res.end(JSON.stringify({ ok: true, app: 'cfbaza-site', mode: 'restore', created: dump.created || null,
+        rowCounts, note: 'Секреты входа и администратора созданы заново.' }));
     }
     // Windows backup agent: inaccessible until a strong BACKUP_PULL_TOKEN is set.
     if (p === '/api/private/backup' && req.method === 'GET') {
