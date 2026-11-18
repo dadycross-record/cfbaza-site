@@ -20,6 +20,7 @@ const L = require('./lib/legal');
 const W = require('./lib/wod');
 const { consumeLogin, csvCell, durableLimit } = require('./lib/security');
 const backup = require('./lib/backup');
+const automaticBackups = require('./lib/automatic-backups');
 const { createFinance } = require('./lib/finance');
 const csp = require('./lib/csp');
 
@@ -1212,12 +1213,28 @@ async function handleAdmin(ctx) {
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
   if (p === '/admin/finance' || p.startsWith('/admin/finance/')) return finance.manage(ctx, form, (title, body) => adminRender(ctx, title, body));
   if (p === '/admin/backups') {
+    const saved=await automaticBackups.summary(db);
+    const rows=saved.map(row=>`<tr><td>${row.kind==='daily'?'Ежедневная':row.kind==='weekly'?'Еженедельная':'Ежемесячная'}</td><td>${V.e(row.period)}</td><td><form method="post" action="/admin/backups/saved"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><input type="hidden" name="kind" value="${V.e(row.kind)}"><input type="hidden" name="period" value="${V.e(row.period)}"><button class="btn" type="submit">Скачать</button></form></td></tr>`).join('');
     return adminRender(ctx, 'Резервные копии', `<div class="topline"><h1>Резервные копии</h1></div>
     <p>Полный архив CF BAZA содержит свежую копию PostgreSQL и текущий программный код сайта, включая систему учёта финансов и тренировок.</p>
     <form method="post" action="/admin/backups/full"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn btn-primary" type="submit">Скачать полный архив</button></form>
     <p>Файл ZIP сохраняется через браузер. Выберите папку на компьютере для сохранения.</p>
     <form method="post" action="/admin/backups/download"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn" type="submit">Скачать только базу</button></form>
-    <p>В обоих архивах есть персональные данные. Не передавайте их посторонним. Эти кнопки не изменяют и не восстанавливают базу.</p>`);
+    <p>Автоматическое резервирование: ежедневные копии за 30 дней, еженедельные за 12 недель, ежемесячные за 12 месяцев. Копии хранятся на сервере, поэтому дополнительно скачивайте полные ZIP на компьютер.</p>
+    <h2>Автоматические копии</h2>${rows?'<table><thead><tr><th>Тип</th><th>Период</th><th>Файл</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p>Копии появятся после запуска автоматического задания.</p>'}
+    <p>В архивах есть персональные данные. Не передавайте их посторонним. Скачивание ничего не восстанавливает.</p>`);
+  }
+  if (p === '/admin/backups/saved' && form) {
+    if (rateLimited('backup-saved-download', 12, 3600000)) return ctx.text('Слишком много скачиваний',429);
+    const kind=String(form.fields.kind||''),period=String(form.fields.period||'');
+    if(!['daily','weekly','monthly'].includes(kind)||!/^[0-9]{4}-(?:[0-9]{2}|W[0-9]{2})(?:-[0-9]{2})?$/.test(period))return ctx.text('Неверные параметры копии',400);
+    const saved=await db.get('SELECT data FROM automatic_backups WHERE kind=$1 AND period=$2',[kind,period]);
+    if(!saved)return ctx.text('Копия не найдена',404);
+    const data=Buffer.isBuffer(saved.data)?saved.data:Buffer.from(saved.data);
+    ctx.res.writeHead(200,ctx.headers({'Content-Type':'application/gzip',
+      'Content-Disposition':`attachment; filename="cfbaza-${kind}-${period}.json.gz"`,
+      'Content-Length':data.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}));
+    return ctx.res.end(data);
   }
   if (p === '/admin/backups/full' && form) {
     if (rateLimited('backup-full-download', 4, 3600000)) return ctx.text('Слишком много скачиваний. Попробуйте позже.', 429);
@@ -1423,6 +1440,10 @@ async function purgeOldLeads() {
 
 async function main() {
   await init();
+  await automaticBackups.init(db);
+  const backupCycle=async()=>{try{await automaticBackups.run(db);}catch(err){console.error('CF BAZA automatic backup:',err.message);}};
+  await backupCycle();
+  setInterval(backupCycle,60*60*1000).unref();
   await crmBackfill();
   await purgeOldLeads();
   setInterval(purgeOldLeads, 24 * 3600 * 1000).unref();
