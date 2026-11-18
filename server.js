@@ -1212,7 +1212,27 @@ async function handleAdmin(ctx) {
   if (p === '/admin' || p === '/admin/') return adminDash(ctx);
   if (p === '/admin/finance' || p.startsWith('/admin/finance/')) return finance.manage(ctx, form, (title, body) => adminRender(ctx, title, body));
   if (p === '/admin/backups') {
-    return adminRender(ctx, 'Резервная копия', `<div class="topline"><h1>Резервная копия</h1></div><p>Скачайте копию базы CF BAZA на компьютер. Она включает настройки, фотографии, заявки, CRM и тренировки.</p><p>Скачивание выполняется вручную. На выключенный компьютер сайт не может сохранять копии автоматически.</p><form method="post" action="/admin/backups/download"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn btn-primary" type="submit">Скачать копию CF BAZA</button></form><p>Файл содержит персональные данные. Храните его в защищённой папке. Для восстановления требуется отдельная проверка; эта кнопка ничего не восстанавливает.</p>`);
+    return adminRender(ctx, 'Резервные копии', `<div class="topline"><h1>Резервные копии</h1></div>
+    <p>Полный архив CF BAZA содержит свежую копию PostgreSQL и текущий программный код сайта, включая систему учёта финансов и тренировок.</p>
+    <form method="post" action="/admin/backups/full"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn btn-primary" type="submit">Скачать полный архив</button></form>
+    <p>Файл ZIP сохраняется через браузер. Выберите папку на компьютере для сохранения.</p>
+    <form method="post" action="/admin/backups/download"><input type="hidden" name="csrf" value="${V.e(ctx.session.csrf)}"><button class="btn" type="submit">Скачать только базу</button></form>
+    <p>В обоих архивах есть персональные данные. Не передавайте их посторонним. Эти кнопки не изменяют и не восстанавливают базу.</p>`);
+  }
+  if (p === '/admin/backups/full' && form) {
+    if (rateLimited('backup-full-download', 4, 3600000)) return ctx.text('Слишком много скачиваний. Попробуйте позже.', 429);
+    const database = await backup.snapshot(db);
+    const { fullArchive } = require('./lib/full-archive');
+    const archive = await fullArchive(database);
+    const stamp = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0,16).replace(/[-:T]/g,'');
+    ctx.res.writeHead(200, ctx.headers({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="cfbaza-full-${stamp}.zip"`,
+      'Content-Length': archive.length,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    }));
+    return ctx.res.end(archive);
   }
   if (p === '/admin/backups/download' && form) {
     if (rateLimited('backup-download', 6, 3600000)) return ctx.text('Слишком много скачиваний. Попробуйте позже.', 429);
